@@ -15,7 +15,7 @@ A self-contained, portable Python overlay that walks the merchant's shelf grid i
    - Installs all packages.
 3. **Start The Hell 4** and open the merchant's Trade / Repair screen.
 4. **Choose option 2 -- Launch** from SETUP.bat (or double-click `run.bat`).
-5. Overlay appears → click **Calibrate** and set your shelf grid coordinates.
+5. Overlay appears → click **Calibrate**, set column/row counts, then click **Mark Grid Area** and drag over the entire shelf grid.
 6. Click **Pass List** to add any items you want to exclude from comparison.
 7. Press **BEGIN** (or **F6**) and let the inspector walk the shelf!
 
@@ -85,16 +85,18 @@ Some rare items carry **both flat +GF AND % GF**. When found:
 
 ## Calibration
 
-The inspector must know where your shelf grid sits on screen.
+The inspector must know where your shelf grid sits on screen. Calibration uses a **drag-select overlay** — works at any resolution without pixel-hunting.
 
-1. Open the merchant in-game.
-2. Click **Calibrate** in the overlay.
-3. Hover over:
-   - **Top-left cell** (col 0, row 0) → Capture TL
-   - **One column right** (col 1, row 0) → Capture W
-   - **One row down** (col 0, row 1) → Capture H
-4. Set column / row counts and timing delays.
-5. Click **Apply & Close** — saved automatically.
+1. Open the merchant in-game (Trade / Repair window visible).
+2. Click **Calibrate** in the GoldSense overlay.
+3. Set the **column** and **row** counts to match the merchant grid.
+4. Click **Mark Grid Area** — the screen dims and a crosshair cursor appears.
+5. **Click and drag** from the **top-left corner** of the grid to the **bottom-right corner**.
+   - A live grid preview appears while dragging so you can see cell lines.
+6. **Release the mouse** — cell width and height are calculated automatically from the dragged area.
+7. Adjust timing delays if needed, then click **Apply & Close**.
+
+> **Tip:** If the grid preview lines don't line up with the in-game cells, check your column/row counts and re-drag.
 
 ---
 
@@ -126,13 +128,14 @@ The inspector must know where your shelf grid sits on screen.
 
 | Problem | Fix |
 |---------|-----|
-| Inspecting wrong area | Calibrate — re-set grid origin |
+| Inspecting wrong area | Calibrate — re-drag the grid area |
 | Tooltip not captured | Increase `HOVER_DELAY_MS` |
 | Comparison doesn't appear | Increase `ALT_DELAY_MS` |
 | OCR misses text | Try windowed / borderless mode |
 | Hotkeys unresponsive | Run as Administrator |
 | `ModuleNotFoundError` | SETUP.bat → option 4 Repair |
 | Comparison split wrong | Check session log; adjust `WORN_MARKERS` in Config |
+| Grid preview misaligned | Re-check column/row counts, then re-drag |
 
 ---
 
