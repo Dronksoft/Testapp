@@ -1,0 +1,16 @@
+# Python environment
+env/
+_conda/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime data
+_tools/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
