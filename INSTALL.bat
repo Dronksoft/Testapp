@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
-title TH4 Shop-Bot v1.1.0
+title GoldSense v1.1.0
 
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYTHONNOUSERSITE=1"
@@ -9,15 +9,15 @@ set "PYTHONUTF8=1"
 set "PIP_ROOT_USER_ACTION=ignore"
 
 rem ================================================================
-rem  TH4 Shop-Bot v1.1.0  --  The Hell 4 Gold-Find Item Scanner
-rem  Fully portable. Unzip anywhere, run INSTALL.bat, done.
+rem  GoldSense v1.1.0  --  Merchant Inventory Inspector
+rem  Fully portable. Unzip anywhere, run SETUP.bat, done.
 rem ================================================================
 
 set "SRC_DIR=%~dp0"
 if "%SRC_DIR:~-1%"=="\" set "SRC_DIR=%SRC_DIR:~0,-1%"
 
-if defined TH4BOT_INSTALL_DIR (
-    set "INSTALL_DIR=%TH4BOT_INSTALL_DIR%"
+if defined GS_INSTALL_DIR (
+    set "INSTALL_DIR=%GS_INSTALL_DIR%"
 ) else if not "%~1"=="" (
     set "INSTALL_DIR=%~1"
 ) else (
@@ -49,7 +49,7 @@ if not exist "%TOOLS_DIR%"    mkdir "%TOOLS_DIR%"
 if not exist "%BACKUPS_DIR%"  mkdir "%BACKUPS_DIR%"
 
 call :timestamp TS_START
-echo [%TS_START%] TH4 Shop-Bot installer v%APP_VERSION% > "%LOG%"
+echo [%TS_START%] GoldSense setup v%APP_VERSION% > "%LOG%"
 echo Repo:    %SRC_DIR%    >> "%LOG%"
 echo Install: %INSTALL_DIR% >> "%LOG%"
 
@@ -60,22 +60,21 @@ rem ================================================================
 cls
 echo.
 echo  +--------------------------------------------------------------+
-echo  ^|  TH4 Shop-Bot v%APP_VERSION%  --  The Hell 4 Gold-Find Scanner   ^|
+echo  ^|  GoldSense  v%APP_VERSION%  --  Merchant Inventory Inspector         ^|
 echo  +--------------------------------------------------------------+
-echo  ^|   1)  Install    -- First-time setup                        ^|
-echo  ^|   2)  Launch     -- Start the Shop-Bot                      ^|
-echo  ^|   3)  Update     -- Upgrade packages                        ^|
-echo  ^|   4)  Repair     -- Fix / restore environment               ^|
-echo  ^|   5)  About      -- How it works                            ^|
+echo  ^|   1)  Setup     -- First-time installation                  ^|
+echo  ^|   2)  Launch    -- Start the inspector                      ^|
+echo  ^|   3)  Update    -- Upgrade packages                         ^|
+echo  ^|   4)  Repair    -- Fix / restore environment                ^|
+echo  ^|   5)  About     -- How it works                             ^|
 echo  ^|   6)  Exit                                                   ^|
 echo  +--------------------------------------------------------------+
 if exist "%ENV_PYTHON%" (
-    echo  Status: [INSTALLED]   env at %INSTALL_DIR%\env\
+    echo  Status: [READY]   env at %INSTALL_DIR%\env\
 ) else (
-    echo  Status: [NOT INSTALLED]  -- run option 1 first
+    echo  Status: [NOT SET UP]  -- run option 1 first
 )
-echo  Repo:    %SRC_DIR%
-echo  Install: %INSTALL_DIR%
+echo  Dir: %INSTALL_DIR%
 echo  +--------------------------------------------------------------+
 echo.
 
@@ -94,7 +93,7 @@ timeout /t 2 >nul
 goto :MENU
 
 :DO_INSTALL
-echo  --- INSTALL ---
+echo  --- SETUP ---
 echo.
 if exist "%ENV_PYTHON%" (
     set "REINSTALL="
@@ -115,18 +114,18 @@ call :step_packages
 if errorlevel 1 goto :install_failed
 echo.
 echo  +--------------------------------------------------------------+
-echo  ^|  INSTALL COMPLETE!                                           ^|
-echo  ^|  1. Open The Hell 4 and enter Griswold's shop.              ^|
-echo  ^|  2. Launch bot (option 2), click Calibrate, set grid.      ^|
-echo  ^|  3. Press START (F6) and let it scan!                       ^|
-echo  ^|  Hotkeys: F6=Start/Stop  F7=Continue  F8=Pause  ESC=Stop  ^|
+echo  ^|  SETUP COMPLETE!                                             ^|
+echo  ^|  1. Open The Hell 4 and enter the merchant shop.            ^|
+echo  ^|  2. Launch (option 2), click Calibrate, set grid.          ^|
+echo  ^|  3. Press BEGIN (F6) and let it walk!                       ^|
+echo  ^|  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt       ^|
 echo  +--------------------------------------------------------------+
 call :pause_return
 goto :MENU
 
 :install_failed
 echo.
-echo  INSTALL DID NOT COMPLETE. Check messages above.
+echo  SETUP DID NOT COMPLETE. Check messages above.
 echo  Log: %LOG%
 call :pause_return
 goto :MENU
@@ -145,15 +144,15 @@ if not exist "%SRC_DIR%\src\main.py" (
 )
 "%ENV_PYTHON%" --version
 echo.
-echo  Hotkeys: F6=Start/Stop  F7=Continue  F8=Pause  ESC=Emergency
+echo  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt
 echo.
 "%ENV_PYTHON%" "%SRC_DIR%\src\main.py"
 set "EC=%ERRORLEVEL%"
 echo.
 if %EC% NEQ 0 (
-    echo  [ERROR] Shop-Bot exited with code %EC%. Check logs\ folder.
+    echo  [ERROR] Exited with code %EC%. Check logs\ folder.
 ) else (
-    echo  Shop-Bot exited normally.
+    echo  Exited normally.
 )
 call :pause_return
 goto :MENU
@@ -207,14 +206,14 @@ goto :MENU
 :DO_ABOUT
 cls
 echo.
-echo  TH4 Shop-Bot v%APP_VERSION%
-echo  Scans Griswold's shop for items with flat +to Gold Find.
-echo  Compares against equipped item (via ALT comparison tooltip).
-echo  Stops only when shop item beats or matches equipped.
-echo  Dual GF items (flat + %%) require mandatory manual dismiss.
-echo  Ignore list bypasses comparison for specific items.
+echo  GoldSense v%APP_VERSION%
+echo  Walks the merchant's shelf grid looking for flat +Gold Find affixes.
+echo  Compares shelf items against currently worn gear (via ALT comparison).
+echo  Pauses only when the shelf item beats or matches worn gear.
+echo  Dual GF items (flat + %%) require manual confirmation before passing.
+echo  Pass list bypasses worn-item comparison for specific named items.
 echo.
-echo  Hotkeys: F6=Start/Stop  F7=Continue  F8=Pause  ESC=Emergency
+echo  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt
 echo.
 call :pause_return
 goto :MENU
