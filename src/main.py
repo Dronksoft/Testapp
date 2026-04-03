@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-  GoldSense  v1.1.0  --  Merchant Inventory Inspector
+  GoldSense  v1.2.0  --  Merchant Inventory Inspector
   Self-contained, self-hosted, single-file application.
 =============================================================================
   HOW IT WORKS
   ------------
-  1.  Open the merchant's trade window.
-  2.  Run this script. An overlay window appears top-left.
-  3.  Press BEGIN (or F6) to start walking the inventory.
-  4.  The inspector moves the cursor across every shelf slot. For each slot:
-        a) Normal hover -> capture tooltip -> quick check for gold-find text.
-        b) If gold-find text found -> hold ALT -> capture the side-by-side
-           COMPARISON tooltip the game shows.
-        c) Read BOTH the shelf item AND the currently worn item.
-        d) Only pause if: shelf_flat_gf >= worn_flat_gf
-           OR worn slot is on the PASS LIST
-           OR item has BOTH flat + % gold find (RARE -- must confirm).
-  5.  When a qualifying item is spotted:
+  1.  Open the merchant's trade window in-game.
+  2.  Run this script. An overlay window appears.
+  3.  Click "Calibrate" and drag a rectangle over the ENTIRE merchant
+      grid in the game window -- top-left corner to bottom-right corner.
+      Cell size is derived automatically from the drag area + grid counts.
+  4.  Press BEGIN (or F6) to start walking the inventory.
+  5.  The inspector moves the cursor to the centre of each shelf slot.
+      For each slot:
+        a) Hover -> wait -> capture tooltip -> quick check for gold-find.
+        b) If gold-find found -> hold ALT -> capture the comparison tooltip.
+        c) Parse BOTH the shelf item AND the currently worn item.
+        d) Pause when: shelf_flat_gf >= worn_flat_gf
+                       OR worn slot is on the PASS LIST
+                       OR item has BOTH flat + % gold find (DUAL -- rare).
+  6.  When a qualifying item is spotted:
         - Cursor stays on that slot.
         - Overlay shows detected values.
-        - Inspector PAUSES and waits for you.
-  6.  You decide: Buy (Shift+Click yourself) or pass.
-  7.  Press NEXT (overlay button or F7) to resume walking.
-  8.  After all slots are checked the inspector presses R to restock and loops.
+        - Inspector PAUSES and waits for your decision.
+  7.  Buy (Shift+Click yourself) or pass.
+  8.  Press NEXT (overlay button or F7) to resume.
+  9.  After all slots are checked the inspector presses R to restock and loops.
 
   PASS LIST
   ---------
   Items on the pass list bypass the worn-item comparison entirely.
-  Useful for uniques you intend to keep regardless of stats.
+  Useful for slots you intend to keep regardless of stats.
 
   KEY CONTROLS (global hotkeys)
   F6   --  Begin / Halt toggle
@@ -42,7 +45,7 @@
 
   SETUP
   -----
-  Run SETUP.bat first, then option 2 to launch.
+  Run INSTALL.bat first, then option 2 to launch.
 =============================================================================
 """
 
@@ -78,7 +81,7 @@ except ImportError:
 try:
     import pyautogui
     pyautogui.FAILSAFE = False
-    pyautogui.PAUSE = 0.0
+    pyautogui.PAUSE    = 0.0
 except ImportError:
     _missing.append("pyautogui>=0.9.54")
 try:
@@ -93,7 +96,7 @@ except ImportError:
 
 if _missing:
     print("=" * 60)
-    print("  MISSING PACKAGES -- run SETUP.bat first!")
+    print("  MISSING PACKAGES -- run INSTALL.bat first!")
     print("=" * 60)
     for p in _missing:
         print(f"    pip install {p}")
@@ -107,16 +110,16 @@ if _missing:
 # ---------------------------------------------------------------------------
 
 class Config:
-    APP_NAME        = "GoldSense"
-    APP_VERSION     = "1.1.0"
+    APP_NAME    = "GoldSense"
+    APP_VERSION = "1.2.0"
 
-    # Shelf grid geometry (pixels)
-    SHELF_ORIGIN_X  = 40
-    SHELF_ORIGIN_Y  = 108
-    CELL_W          = 29
-    CELL_H          = 29
-    SHELF_COLS      = 10
-    SHELF_ROWS      = 14
+    # Shelf grid geometry (pixels) -- overwritten by calibration
+    SHELF_ORIGIN_X = 40
+    SHELF_ORIGIN_Y = 108
+    CELL_W         = 29
+    CELL_H         = 29
+    SHELF_COLS     = 10
+    SHELF_ROWS     = 14
 
     # Tooltip capture
     HOVER_DELAY_MS   = 180
@@ -140,11 +143,11 @@ class Config:
         r"(\d+)\s*%\s*(?:to\s+)?gold\s*found",
     ]
 
-    MIN_GOLD_FIND   = 1
+    MIN_GOLD_FIND = 1
 
     # Comparison tooltip split markers
-    WORN_MARKERS     = ["equipped", "currently equipped", "worn", "eq:"]
-    SHELF_MARKERS    = ["selected", "shop item", "buy price", "shift click to buy"]
+    WORN_MARKERS  = ["equipped", "currently equipped", "worn", "eq:"]
+    SHELF_MARKERS = ["selected", "shop item", "buy price", "shift click to buy"]
 
     # Pass list -- partial name match, case-insensitive
     PASS_LIST: List[str] = [
@@ -255,13 +258,13 @@ class GoldHit:
 
 @dataclass
 class WalkStats:
-    lap_number:   int   = 0
-    cells_visited: int  = 0
-    hits:         int   = 0
-    dual_hits:    int   = 0
-    best_flat:    int   = 0
-    best_pct:     int   = 0
-    start_time:   float = field(default_factory=time.time)
+    lap_number:    int   = 0
+    cells_visited: int   = 0
+    hits:          int   = 0
+    dual_hits:     int   = 0
+    best_flat:     int   = 0
+    best_pct:      int   = 0
+    start_time:    float = field(default_factory=time.time)
 
     def elapsed_str(self) -> str:
         e = int(time.time() - self.start_time)
@@ -302,7 +305,7 @@ class ScrollReader:
             import asyncio
             import winocr
             loop = asyncio.new_event_loop()
-            res = loop.run_until_complete(winocr.recognize_pil(img, "en"))
+            res  = loop.run_until_complete(winocr.recognize_pil(img, "en"))
             loop.close()
             return res.text if res else ""
         except Exception as exc:
@@ -340,8 +343,8 @@ def _best_match(patterns: list, text: str) -> int:
     for pat in patterns:
         for m in pat.finditer(text):
             try:
-                val = int(m.group(1))
-                tail = text[m.end(1):m.end(1) + 10]
+                val    = int(m.group(1))
+                tail   = text[m.end(1):m.end(1) + 10]
                 range_m = re.search(r"-\s*(\d+)", tail)
                 if range_m:
                     val = int(range_m.group(1))
@@ -392,7 +395,7 @@ def split_comparison_tooltip(full_text: str) -> Tuple[str, str]:
     if eq_pos != -1:
         return full_text[:eq_pos], full_text[eq_pos:]
     lines = full_text.splitlines()
-    mid = max(1, len(lines) // 2)
+    mid   = max(1, len(lines) // 2)
     log.debug("split_comparison: line-count fallback")
     return "\n".join(lines[:mid]), "\n".join(lines[mid:])
 
@@ -435,7 +438,7 @@ class InventoryInspector:
         self._active  = True
         self._halt_ev.clear()
         self._next_ev.clear()
-        self.stats = WalkStats()
+        self.stats    = WalkStats()
         threading.Thread(target=self._walk_loop, daemon=True).start()
         log.info("InventoryInspector: walk started.")
 
@@ -582,10 +585,7 @@ class InventoryInspector:
                     self.stats.best_pct = shelf_item.pct_gf
 
                 ts   = datetime.datetime.now().strftime("%H%M%S_%f")[:9]
-                path = str(
-                    Config.LOG_DIR
-                    / f"hit_{ts}_c{col}_r{row}.png"
-                )
+                path = str(Config.LOG_DIR / f"hit_{ts}_c{col}_r{row}.png")
                 try:
                     img_alt.save(path)
                 except Exception:
@@ -609,7 +609,7 @@ class InventoryInspector:
     def _should_pause(
         self,
         shelf: ParsedItem,
-        worn: ParsedItem,
+        worn:  ParsedItem,
         is_dual: bool,
     ) -> Tuple[bool, str]:
         if shelf.flat_gf < Config.MIN_GOLD_FIND and not is_dual:
@@ -661,463 +661,189 @@ class InventoryInspector:
 
 
 # ---------------------------------------------------------------------------
-#  OVERLAY
+#  DRAG-SELECT CALIBRATION OVERLAY
+#  Covers the entire screen with a transparent Toplevel.
+#  User drags a rectangle over the merchant grid.
+#  Cell dimensions are derived from: area_width / cols, area_height / rows.
 # ---------------------------------------------------------------------------
 
-class OverlayWindow:
-    C = {
-        "bg":         "#1a1a2e",
-        "bg_panel":   "#16213e",
-        "accent":     "#e94560",
-        "gold":       "#f5a623",
-        "green":      "#00c48c",
-        "text":       "#e0e0e0",
-        "muted":      "#888888",
-        "hit_bg":     "#2d1a00",
-        "dual_bg":    "#3d0a2e",
-        "dual_bdr":   "#ff00aa",
-        "btn_bg":     "#0f3460",
-    }
-    FM = ("Courier New", 9)
-    FL = ("Segoe UI", 9)
-    FB = ("Segoe UI", 12, "bold")
-    FT = ("Segoe UI", 8)
+class DragSelectOverlay:
+    """
+    Full-screen transparent drag-select canvas.
 
-    def __init__(self, inspector: InventoryInspector) -> None:
-        self._inspector = inspector
-        self._q:        queue.Queue = queue.Queue()
-        self._root:     Optional[tk.Tk] = None
-        self._live      = True
-        self._current_hit: Optional[GoldHit] = None
+    Usage:
+        overlay = DragSelectOverlay(parent_tk_root, cols, rows, callback)
+        -- shows the overlay
+        -- when user finishes dragging, calls callback(x, y, w, h)
+        -- then destroys itself
+    """
 
-    def run(self) -> None:
-        self._build()
-        self._root.after(100, self._pump)
-        self._root.mainloop()
+    FILL_COLOR   = "#00aaff"
+    FILL_ALPHA   = 0.25          # simulated via stipple
+    BORDER_COLOR = "#00aaff"
+    BORDER_WIDTH = 2
+    LABEL_COLOR  = "#ffffff"
 
-    # --- build UI ----------------------------------------------------------
+    def __init__(
+        self,
+        parent: tk.Tk,
+        cols: int,
+        rows: int,
+        on_done,                 # callable(x, y, w, h)
+    ) -> None:
+        self._parent   = parent
+        self._cols     = cols
+        self._rows     = rows
+        self._on_done  = on_done
 
-    def _build(self) -> None:
-        r = tk.Tk()
-        self._root = r
-        r.title(f"{Config.APP_NAME} v{Config.APP_VERSION}")
-        r.configure(bg=self.C["bg"])
-        r.attributes("-topmost", True)
-        r.attributes("-alpha", Config.OVERLAY_ALPHA)
-        r.geometry(f"468x820+{Config.OVERLAY_X}+{Config.OVERLAY_Y}")
-        r.resizable(True, True)
-        r.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._start_x  = 0
+        self._start_y  = 0
+        self._rect_id  = None
+        self._label_id = None
 
-        # Header
-        hdr = tk.Frame(r, bg=self.C["bg_panel"], pady=6)
-        hdr.pack(fill="x")
-        tk.Label(
-            hdr,
-            text=f"{Config.APP_NAME}  v{Config.APP_VERSION}",
-            font=self.FB,
-            fg=self.C["gold"],
-            bg=self.C["bg_panel"],
-        ).pack()
-        self._status_lbl = tk.Label(
-            hdr, text="Idle",
-            font=self.FL, fg=self.C["muted"], bg=self.C["bg_panel"],
+        self._win = tk.Toplevel(parent)
+        self._win.attributes("-fullscreen",  True)
+        self._win.attributes("-topmost",     True)
+        self._win.attributes("-alpha",       0.35)
+        self._win.configure(bg="black")
+        self._win.overrideredirect(True)
+
+        self._canvas = tk.Canvas(
+            self._win,
+            cursor="crosshair",
+            bg="black",
+            highlightthickness=0,
         )
-        self._status_lbl.pack()
+        self._canvas.pack(fill="both", expand=True)
 
-        # Stats row
-        sf = tk.Frame(r, bg=self.C["bg"], pady=4)
-        sf.pack(fill="x", padx=6)
-        self._sv: dict = {}
-        for key, lbl in [
-            ("lap",    "Lap #"),
-            ("cells",  "Cells"),
-            ("hits",   "Hits"),
-            ("dual",   "Dual GF"),
-            ("best_f", "Best +Flat"),
-            ("best_p", "Best %"),
-            ("elapsed","Time"),
-        ]:
-            cf = tk.Frame(sf, bg=self.C["bg_panel"], padx=4, pady=3)
-            cf.pack(side="left", expand=True, fill="x", padx=1)
-            tk.Label(
-                cf, text=lbl, font=self.FT,
-                fg=self.C["muted"], bg=self.C["bg_panel"],
-            ).pack()
-            v = tk.StringVar(value="0")
-            self._sv[key] = v
-            tk.Label(
-                cf, textvariable=v,
-                font=("Segoe UI", 10, "bold"),
-                fg=self.C["gold"], bg=self.C["bg_panel"],
-            ).pack()
-
-        # Current cell
-        tf = tk.Frame(r, bg=self.C["bg"])
-        tf.pack(fill="x", padx=6, pady=1)
-        tk.Label(
-            tf, text="Cell:",
-            font=self.FT, fg=self.C["muted"], bg=self.C["bg"],
-        ).pack(side="left")
-        self._cell_var = tk.StringVar(value="--")
-        tk.Label(
-            tf, textvariable=self._cell_var,
-            font=self.FM, fg=self.C["text"], bg=self.C["bg"],
-        ).pack(side="left", padx=4)
-
-        # Hit panel
-        self._hit_frame = tk.Frame(
-            r, bg=self.C["hit_bg"], relief="groove", bd=2
-        )
-        self._hit_frame.pack(fill="x", padx=6, pady=4)
-        self._hit_lbl = tk.Label(
-            self._hit_frame, text="No hits yet.",
-            font=("Segoe UI", 10, "bold"),
-            fg=self.C["gold"], bg=self.C["hit_bg"],
-            wraplength=430, justify="left", pady=6, padx=6,
-        )
-        self._hit_lbl.pack(fill="x")
-        self._cmp_lbl = tk.Label(
-            self._hit_frame, text="",
-            font=self.FM, fg=self.C["text"], bg=self.C["hit_bg"],
-            wraplength=430, justify="left", padx=6,
-        )
-        self._cmp_lbl.pack(fill="x")
-
-        # Dual GF banner (hidden by default)
-        self._dual_frame = tk.Frame(
-            r, bg=self.C["dual_bg"], relief="groove", bd=3
-        )
-        self._dual_lbl = tk.Label(
-            self._dual_frame, text="",
-            font=("Segoe UI", 11, "bold"),
-            fg=self.C["dual_bdr"], bg=self.C["dual_bg"],
-            wraplength=430, justify="center", pady=8, padx=6,
-        )
-        self._dual_lbl.pack(fill="x")
-
-        # Primary buttons
-        bs = dict(
-            font=("Segoe UI", 10, "bold"),
-            relief="flat", padx=8, pady=4, cursor="hand2",
-        )
-        bf1 = tk.Frame(r, bg=self.C["bg"], pady=4)
-        bf1.pack(fill="x", padx=6)
-        self._btn_begin = tk.Button(
-            bf1, text="  BEGIN  (F6)",
-            bg=self.C["green"], fg="white",
-            command=self._toggle_begin, **bs,
-        )
-        self._btn_begin.pack(side="left", expand=True, fill="x", padx=2)
-        self._btn_next = tk.Button(
-            bf1, text="  NEXT  (F7)",
-            bg=self.C["btn_bg"], fg=self.C["muted"],
-            state="disabled", command=self._next, **bs,
-        )
-        self._btn_next.pack(side="left", expand=True, fill="x", padx=2)
-
-        # Secondary buttons
-        bf2 = tk.Frame(r, bg=self.C["bg"])
-        bf2.pack(fill="x", padx=6, pady=2)
-        for txt, cmd in [
-            ("HOLD (F8)",   self._hold),
-            ("Calibrate",   self._open_calibrate),
-            ("Pass List",   self._open_passlist),
-            ("Open Log",    self._open_log),
-        ]:
-            tk.Button(
-                bf2, text=txt, bg=self.C["btn_bg"],
-                fg=self.C["text"], command=cmd, **bs,
-            ).pack(side="left", expand=True, fill="x", padx=2)
-
-        # Hotkey hint
-        hk = tk.Frame(r, bg=self.C["bg_panel"], pady=2)
-        hk.pack(fill="x", padx=6, pady=2)
-        tk.Label(
-            hk,
-            text="F6=Begin/Halt   F7=Next   F8=Hold   ESC=Halt",
-            font=self.FT, fg=self.C["muted"], bg=self.C["bg_panel"],
-        ).pack()
-
-        # Live log
-        tk.Label(
-            r, text="Activity Log",
-            font=self.FT, fg=self.C["muted"], bg=self.C["bg"],
-        ).pack(anchor="w", padx=8)
-        self._log_box = scrolledtext.ScrolledText(
-            r, height=10, font=self.FM,
-            bg="#0d0d1a", fg=self.C["text"],
-            state="disabled", relief="flat",
-        )
-        self._log_box.pack(fill="both", expand=True, padx=6, pady=(0, 4))
-
-        # Hit history
-        tk.Label(
-            r, text="Hit History",
-            font=self.FT, fg=self.C["muted"], bg=self.C["bg"],
-        ).pack(anchor="w", padx=8)
-        self._hist_box = scrolledtext.ScrolledText(
-            r, height=6, font=self.FM,
-            bg="#0d0d1a", fg=self.C["gold"],
-            state="disabled", relief="flat",
-        )
-        self._hist_box.pack(
-            fill="both", expand=False, padx=6, pady=(0, 6)
-        )
-
-        # Wire inspector callbacks
-        self._inspector.on_hit     = lambda h: self._q.put(("hit", h))
-        self._inspector.on_cell    = lambda c, ro, t: self._q.put(("cell", (c, ro, t)))
-        self._inspector.on_restock = lambda n: self._q.put(("restock", n))
-        self._inspector.on_status  = lambda s: self._q.put(("status", s))
-        self._inspector.on_halted  = lambda: self._q.put(("halted",))
-
-        self._reg_hotkeys()
-        self._root.after(500, self._tick_stats)
-
-    # --- hotkeys -----------------------------------------------------------
-
-    def _reg_hotkeys(self) -> None:
-        for key, fn in [
-            (Config.HOTKEY_BEGIN_HALT, self._toggle_begin),
-            (Config.HOTKEY_NEXT,       self._next),
-            (Config.HOTKEY_HOLD,       self._hold),
-            (Config.HOTKEY_HALT,       self._emergency),
-        ]:
-            try:
-                keyboard.add_hotkey(key, fn, suppress=False)
-            except Exception as exc:
-                log.warning(f"Hotkey {key} failed: {exc}")
-
-    # --- event pump --------------------------------------------------------
-
-    def _pump(self) -> None:
-        try:
-            while True:
-                msg  = self._q.get_nowait()
-                kind = msg[0]
-                if kind == "hit":
-                    self._on_hit(msg[1])
-                elif kind == "cell":
-                    c, ro, _ = msg[1]
-                    self._cell_var.set(f"[col={c}, row={ro}]")
-                elif kind == "restock":
-                    self._log(f"=== Shelf restocked (lap #{msg[1]}) ===", "gold")
-                elif kind == "status":
-                    self._set_status(msg[1])
-                elif kind == "halted":
-                    self._btn_begin.config(
-                        text="  BEGIN  (F6)", bg=self.C["green"]
-                    )
-                    self._btn_next.config(
-                        state="disabled",
-                        bg=self.C["btn_bg"],
-                        fg=self.C["muted"],
-                    )
-                    self._set_status("Halted")
-                    self._hide_dual_banner()
-        except queue.Empty:
-            pass
-        if self._live:
-            self._root.after(50, self._pump)
-
-    # --- hit display -------------------------------------------------------
-
-    def _on_hit(self, h: GoldHit) -> None:
-        self._current_hit = h
-        si = h.shelf_item
-        wi = h.worn_item
-
-        if h.is_dual_gf:
-            header = (
-                f"DUAL GF!  +{si.flat_gf} flat & +{si.pct_gf}%"
-                f"  -- confirm before passing"
-            )
-            self._hit_frame.config(bg=self.C["dual_bg"])
-            self._hit_lbl.config(
-                bg=self.C["dual_bg"], fg=self.C["dual_bdr"], text=header
-            )
-            self._show_dual_banner(si)
-        else:
-            header = f"+{si.flat_gf} Gold Find  --  '{si.name}'"
-            self._hit_frame.config(bg="#4a2a00")
-            self._hit_lbl.config(bg="#4a2a00", fg=self.C["gold"], text=header)
-            self._hide_dual_banner()
-
-        lines = [f"  Shelf: +{si.flat_gf} flat  +{si.pct_gf}%  [{si.name[:40]}]"]
-        if wi:
-            tag = " (PASSED)" if is_passed(wi) else ""
-            lines.append(
-                f"  Worn:  +{wi.flat_gf} flat  +{wi.pct_gf}%"
-                f"  [{wi.name[:40]}]{tag}"
-            )
-        self._cmp_lbl.config(
-            text="\n".join(lines),
-            bg=self._hit_frame["bg"],
-        )
-
-        next_txt = "  PASS  (F7)" if h.is_dual_gf else "  NEXT  (F7)"
-        self._btn_next.config(
-            state="normal",
-            bg=self.C["dual_bdr"] if h.is_dual_gf else self.C["accent"],
-            fg="white",
-            text=next_txt,
-        )
-
-        kind_tag = "DUAL" if h.is_dual_gf else "HIT"
-        hist = (
-            f"{h.timestamp[11:19]}  [{kind_tag}]  "
-            f"+{si.flat_gf}flat  +{si.pct_gf}%  "
-            f"[{h.col:2d},{h.row:2d}]  {si.name[:30]}\n"
-        )
-        self._append_hist(hist)
-        self._log(header, "accent" if h.is_dual_gf else "gold")
-        self._set_status(
-            "WAITING -- DUAL GF -- confirm before passing"
-            if h.is_dual_gf else
-            "WAITING -- press F7 to pass"
-        )
-
-    def _show_dual_banner(self, si: ParsedItem) -> None:
-        self._dual_lbl.config(
+        # Instruction label
+        self._canvas.create_text(
+            self._canvas.winfo_screenwidth() // 2, 40,
             text=(
-                f"DUAL GOLD-FIND ITEM\n"
-                f"+{si.flat_gf} flat  AND  +{si.pct_gf}% percent\n"
-                f"This is RARE -- confirm before passing!\n"
-                f"Buy with Shift+Click, or press F7 to pass."
-            )
+                "Drag to mark the ENTIRE merchant grid  "
+                "(top-left corner --> bottom-right corner)\n"
+                "Release mouse to confirm.  Press ESC to cancel."
+            ),
+            fill=self.LABEL_COLOR,
+            font=("Segoe UI", 14, "bold"),
+            justify="center",
+            tags="hint",
         )
-        self._dual_frame.pack(fill="x", padx=6, pady=2)
 
-    def _hide_dual_banner(self) -> None:
-        try:
-            self._dual_frame.pack_forget()
-        except Exception:
-            pass
+        self._canvas.bind("<ButtonPress-1>",   self._on_press)
+        self._canvas.bind("<B1-Motion>",        self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>", self._on_release)
+        self._win.bind("<Escape>",             self._cancel)
 
-    # --- button callbacks --------------------------------------------------
+    # --- drag handlers -----------------------------------------------------
 
-    def _toggle_begin(self) -> None:
-        if self._inspector._active:
-            self._inspector.halt()
-            self._btn_begin.config(
-                text="  BEGIN  (F6)", bg=self.C["green"]
-            )
-        else:
-            self._inspector.begin()
-            self._btn_begin.config(
-                text="  HALT  (F6)", bg=self.C["accent"]
-            )
-            self._log("Walk started.", "green")
-            self._hide_dual_banner()
+    def _on_press(self, ev) -> None:
+        self._start_x = ev.x
+        self._start_y = ev.y
+        if self._rect_id:
+            self._canvas.delete(self._rect_id)
+            self._rect_id = None
+        if self._label_id:
+            self._canvas.delete(self._label_id)
+            self._label_id = None
 
-    def _next(self) -> None:
-        h = self._current_hit
-        if h and h.is_dual_gf:
-            if not messagebox.askyesno(
-                "Pass on DUAL GF item?",
-                (
-                    f"Are you sure you want to PASS on this dual Gold-Find item?\n"
-                    f"+{h.shelf_item.flat_gf} flat AND +{h.shelf_item.pct_gf}%\n\n"
-                    f"Press NO to go back and buy it."
-                ),
-                default="no",
-            ):
-                return
-        self._inspector.user_next()
-        self._btn_next.config(
-            state="disabled",
-            text="  NEXT  (F7)",
-            bg=self.C["btn_bg"],
-            fg=self.C["muted"],
+    def _on_drag(self, ev) -> None:
+        if self._rect_id:
+            self._canvas.delete(self._rect_id)
+        if self._label_id:
+            self._canvas.delete(self._label_id)
+
+        x0 = min(self._start_x, ev.x)
+        y0 = min(self._start_y, ev.y)
+        x1 = max(self._start_x, ev.x)
+        y1 = max(self._start_y, ev.y)
+        w  = x1 - x0
+        h  = y1 - y0
+
+        self._rect_id = self._canvas.create_rectangle(
+            x0, y0, x1, y1,
+            outline=self.BORDER_COLOR,
+            width=self.BORDER_WIDTH,
+            fill=self.FILL_COLOR,
+            stipple="gray25",
         )
-        self._hide_dual_banner()
-        self._hit_frame.config(bg=self.C["hit_bg"])
-        self._hit_lbl.config(bg=self.C["hit_bg"])
-        self._cmp_lbl.config(bg=self.C["hit_bg"], text="")
-        self._log("Passed.", "muted")
 
-    def _hold(self) -> None:
-        self._inspector.hold_toggle()
+        cw = max(1, w // self._cols)
+        ch = max(1, h // self._rows)
 
-    def _emergency(self) -> None:
-        log.warning("HALT!")
-        self._inspector.halt()
-        self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
-        self._hide_dual_banner()
-        self._set_status("HALTED")
+        # Draw grid preview
+        for c in range(1, self._cols):
+            lx = x0 + c * cw
+            self._canvas.create_line(
+                lx, y0, lx, y1,
+                fill="#ffffff", dash=(2, 4), tags="grid_preview",
+            )
+        for r in range(1, self._rows):
+            ly = y0 + r * ch
+            self._canvas.create_line(
+                x0, ly, x1, ly,
+                fill="#ffffff", dash=(2, 4), tags="grid_preview",
+            )
 
-    def _open_calibrate(self) -> None:
-        CalibrationWindow(self._root)
+        self._label_id = self._canvas.create_text(
+            x0 + w // 2, y1 + 18,
+            text=f"{w}x{h} px  |  cell {cw}x{ch} px",
+            fill=self.LABEL_COLOR,
+            font=("Courier New", 10),
+            tags="size_label",
+        )
 
-    def _open_passlist(self) -> None:
-        PassListWindow(self._root)
+    def _on_release(self, ev) -> None:
+        x0 = min(self._start_x, ev.x)
+        y0 = min(self._start_y, ev.y)
+        x1 = max(self._start_x, ev.x)
+        y1 = max(self._start_y, ev.y)
+        w  = x1 - x0
+        h  = y1 - y0
 
-    def _open_log(self) -> None:
-        try:
-            os.startfile(str(_log_file))
-        except Exception:
-            messagebox.showinfo("Session log", str(_log_file))
+        if w < 10 or h < 10:
+            log.warning("DragSelectOverlay: drag too small -- ignored.")
+            self._cancel(None)
+            return
 
-    # --- helpers -----------------------------------------------------------
+        # Convert canvas coords to screen coords
+        win_x = self._win.winfo_rootx()
+        win_y = self._win.winfo_rooty()
+        sx    = win_x + x0
+        sy    = win_y + y0
 
-    def _set_status(self, msg: str) -> None:
-        self._status_lbl.config(text=msg)
+        log.info(
+            f"DragSelectOverlay: confirmed screen=({sx},{sy}) "
+            f"size={w}x{h}"
+        )
+        self._win.destroy()
+        self._on_done(sx, sy, w, h)
 
-    def _log(self, msg: str, color: str = "text") -> None:
-        ts   = datetime.datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}\n"
-        c    = self.C.get(color, self.C["text"])
-        self._log_box.config(state="normal")
-        self._log_box.insert("end", line)
-        tag = f"clr_{color}"
-        self._log_box.tag_config(tag, foreground=c)
-        self._log_box.tag_add(tag, f"end - {len(line) + 1}c", "end - 1c")
-        self._log_box.see("end")
-        self._log_box.config(state="disabled")
-
-    def _append_hist(self, line: str) -> None:
-        self._hist_box.config(state="normal")
-        self._hist_box.insert("end", line)
-        self._hist_box.see("end")
-        self._hist_box.config(state="disabled")
-
-    def _tick_stats(self) -> None:
-        s = self._inspector.stats
-        self._sv["lap"].set(str(s.lap_number))
-        self._sv["cells"].set(str(s.cells_visited))
-        self._sv["hits"].set(str(s.hits))
-        self._sv["dual"].set(str(s.dual_hits))
-        self._sv["best_f"].set(f"+{s.best_flat}")
-        self._sv["best_p"].set(f"+{s.best_pct}%")
-        self._sv["elapsed"].set(s.elapsed_str())
-        if self._live:
-            self._root.after(500, self._tick_stats)
-
-    def _on_close(self) -> None:
-        self._live = False
-        self._inspector.halt()
-        keyboard.unhook_all()
-        _save_prefs()
-        log.info("Overlay closed.")
-        self._root.destroy()
+    def _cancel(self, _ev) -> None:
+        log.info("DragSelectOverlay: cancelled.")
+        self._win.destroy()
 
 
 # ---------------------------------------------------------------------------
-#  CALIBRATION WINDOW
+#  CALIBRATION WINDOW  (settings + drag-select trigger)
 # ---------------------------------------------------------------------------
 
 class CalibrationWindow:
     def __init__(self, parent: tk.Tk) -> None:
+        self._parent = parent
+
         w = tk.Toplevel(parent)
+        self._win = w
         w.title("Grid Calibration")
         w.configure(bg="#1a1a2e")
-        w.geometry("520x640")
+        w.geometry("500x560")
         w.attributes("-topmost", True)
 
         fg    = "#e0e0e0"
         muted = "#888888"
         gold  = "#f5a623"
         bg    = "#1a1a2e"
+        green = "#00c48c"
         bs    = dict(bg="#0f3460", fg="white", relief="flat",
                      font=("Segoe UI", 9))
 
@@ -1128,65 +854,43 @@ class CalibrationWindow:
         ).pack(pady=(10, 2))
 
         instr = (
-            "1.  Open the merchant's inventory in-game.\n"
-            "2.  Hover over TOP-LEFT cell (col 0, row 0) -> Capture TL\n"
-            "3.  Hover over cell ONE COLUMN RIGHT (col 1, row 0) -> Capture W\n"
-            "4.  Hover over cell ONE ROW DOWN (col 0, row 1) -> Capture H\n"
-            "5.  Set column / row counts.\n"
-            "6.  Click Apply & Close.\n\n"
-            "TIP: Increase hover / compare delay if tooltips miss."
+            "HOW TO CALIBRATE\n"
+            "1.  Open the merchant's trade window in-game.\n"
+            "2.  Set the column and row counts below to match the grid.\n"
+            "3.  Click  \"Mark Grid Area\"  -- the screen will dim.\n"
+            "4.  Click and DRAG a rectangle over the ENTIRE merchant grid\n"
+            "    (from top-left cell to bottom-right cell).\n"
+            "5.  Release the mouse -- the cell size is calculated automatically.\n"
+            "6.  Adjust delays if tooltips are missed, then click Apply & Close.\n\n"
+            "TIP: Works at any resolution -- just drag accurately."
         )
         tk.Label(
             w, text=instr, justify="left",
-            font=("Segoe UI", 9), fg=fg, bg=bg, wraplength=470,
+            font=("Segoe UI", 9), fg=fg, bg=bg, wraplength=460,
         ).pack(padx=12, pady=4)
+
+        tk.Frame(w, bg="#333355", height=1).pack(fill="x", padx=12, pady=6)
+
+        # Current calibration readout
+        self._calib_var = tk.StringVar(
+            value=self._calib_str()
+        )
+        tk.Label(
+            w, textvariable=self._calib_var,
+            font=("Courier New", 9), fg=gold, bg=bg,
+            justify="left",
+        ).pack(padx=14, anchor="w")
+
+        tk.Button(
+            w, text="  Mark Grid Area  ",
+            command=self._start_drag,
+            bg=green, fg="white", relief="flat",
+            font=("Segoe UI", 10, "bold"), pady=5,
+        ).pack(pady=8)
 
         tk.Frame(w, bg="#333355", height=1).pack(fill="x", padx=12, pady=4)
 
-        self._tl_x = Config.SHELF_ORIGIN_X
-        self._tl_y = Config.SHELF_ORIGIN_Y
-        self._cw   = Config.CELL_W
-        self._ch   = Config.CELL_H
-        self._tl_var: Optional[tk.StringVar] = None
-        self._cw_var: Optional[tk.StringVar] = None
-        self._ch_var: Optional[tk.StringVar] = None
-
-        def cap_row(
-            lbl_text: str,
-            cap_fn: callable,
-            cap_lbl: str,
-            var_init: str,
-            var_attr: str,
-        ) -> None:
-            fr = tk.Frame(w, bg=bg)
-            fr.pack(fill="x", padx=12, pady=2)
-            tk.Label(
-                fr, text=lbl_text, width=26, anchor="w",
-                fg=muted, bg=bg, font=("Segoe UI", 9),
-            ).pack(side="left")
-            v = tk.StringVar(value=var_init)
-            setattr(self, var_attr, v)
-            tk.Label(
-                fr, textvariable=v,
-                fg=gold, bg=bg, font=("Courier New", 9),
-            ).pack(side="left", padx=4)
-            tk.Button(fr, text=cap_lbl, command=cap_fn, **bs).pack(side="right")
-
-        cap_row(
-            "Top-Left origin:", self._cap_tl, "Capture TL",
-            f"X={self._tl_x}, Y={self._tl_y}", "_tl_var",
-        )
-        cap_row(
-            "Cell width:", self._cap_cw, "Capture W",
-            f"{self._cw} px", "_cw_var",
-        )
-        cap_row(
-            "Cell height:", self._cap_ch, "Capture H",
-            f"{self._ch} px", "_ch_var",
-        )
-
-        tk.Frame(w, bg="#333355", height=1).pack(fill="x", padx=12, pady=8)
-
+        # Spinboxes
         self._spinboxes: dict = {}
         for attr, lbl_text, from_, to_, step in [
             ("SHELF_COLS",     "Columns:",               1, 20,   1),
@@ -1213,44 +917,76 @@ class CalibrationWindow:
 
         tk.Button(
             w, text="Apply & Close",
-            command=lambda: self._apply(w),
-            bg="#00c48c", fg="white", relief="flat",
+            command=self._apply,
+            bg=green, fg="white", relief="flat",
             font=("Segoe UI", 11, "bold"), pady=6,
-        ).pack(pady=14)
+        ).pack(pady=12)
 
-    def _cap_tl(self) -> None:
-        x, y = pyautogui.position()
-        self._tl_x, self._tl_y = x, y
-        self._tl_var.set(f"X={x}, Y={y}")
+    # --- drag-select -------------------------------------------------------
 
-    def _cap_cw(self) -> None:
-        x, _ = pyautogui.position()
-        self._cw = abs(x - self._tl_x)
-        self._cw_var.set(f"{self._cw} px")
+    def _start_drag(self) -> None:
+        # Read current col/row spinbox values before launching overlay
+        try:
+            cols = int(self._spinboxes["SHELF_COLS"].get())
+            rows = int(self._spinboxes["SHELF_ROWS"].get())
+        except ValueError:
+            cols = Config.SHELF_COLS
+            rows = Config.SHELF_ROWS
 
-    def _cap_ch(self) -> None:
-        _, y = pyautogui.position()
-        self._ch = abs(y - self._tl_y)
-        self._ch_var.set(f"{self._ch} px")
+        # Hide calibration window while dragging so it doesn't obstruct view
+        self._win.withdraw()
+        self._parent.after(
+            150,
+            lambda: DragSelectOverlay(
+                self._parent, cols, rows, self._on_drag_done
+            ),
+        )
 
-    def _apply(self, win: tk.Toplevel) -> None:
-        Config.SHELF_ORIGIN_X = self._tl_x
-        Config.SHELF_ORIGIN_Y = self._tl_y
-        Config.CELL_W         = max(1, self._cw)
-        Config.CELL_H         = max(1, self._ch)
+    def _on_drag_done(self, sx: int, sy: int, w: int, h: int) -> None:
+        """Called by DragSelectOverlay after a successful drag."""
+        try:
+            cols = int(self._spinboxes["SHELF_COLS"].get())
+            rows = int(self._spinboxes["SHELF_ROWS"].get())
+        except ValueError:
+            cols = Config.SHELF_COLS
+            rows = Config.SHELF_ROWS
+
+        Config.SHELF_ORIGIN_X = sx
+        Config.SHELF_ORIGIN_Y = sy
+        Config.CELL_W         = max(1, w // cols)
+        Config.CELL_H         = max(1, h // rows)
+
+        log.info(
+            f"Calibration drag: origin=({sx},{sy}) "
+            f"area={w}x{h} cell={Config.CELL_W}x{Config.CELL_H} "
+            f"grid={cols}x{rows}"
+        )
+
+        self._calib_var.set(self._calib_str())
+        self._win.deiconify()
+
+    def _calib_str(self) -> str:
+        return (
+            f"  Origin : ({Config.SHELF_ORIGIN_X}, {Config.SHELF_ORIGIN_Y})\n"
+            f"  Cell   : {Config.CELL_W} x {Config.CELL_H} px\n"
+            f"  Grid   : {Config.SHELF_COLS} cols x {Config.SHELF_ROWS} rows"
+        )
+
+    def _apply(self) -> None:
         for attr, sp in self._spinboxes.items():
             try:
                 setattr(Config, attr, int(sp.get()))
             except ValueError:
                 pass
+        # Recalc cell size if cols/rows changed after a drag
         log.info(
-            f"Calibration saved: origin=("
-            f"{Config.SHELF_ORIGIN_X},{Config.SHELF_ORIGIN_Y}) "
+            f"Calibration applied: origin=({Config.SHELF_ORIGIN_X},"
+            f"{Config.SHELF_ORIGIN_Y}) "
             f"cell=({Config.CELL_W}x{Config.CELL_H}) "
             f"grid={Config.SHELF_COLS}x{Config.SHELF_ROWS}"
         )
         _save_prefs()
-        win.destroy()
+        self._win.destroy()
 
 
 # ---------------------------------------------------------------------------
@@ -1346,6 +1082,436 @@ class PassListWindow:
         log.info(f"Pass list saved: {Config.PASS_LIST}")
         _save_prefs()
         win.destroy()
+
+
+# ---------------------------------------------------------------------------
+#  OVERLAY
+# ---------------------------------------------------------------------------
+
+class OverlayWindow:
+    C = {
+        "bg":       "#1a1a2e",
+        "bg_panel": "#16213e",
+        "accent":   "#e94560",
+        "gold":     "#f5a623",
+        "green":    "#00c48c",
+        "text":     "#e0e0e0",
+        "muted":    "#888888",
+        "hit_bg":   "#2d1a00",
+        "dual_bg":  "#3d0a2e",
+        "dual_bdr": "#ff00aa",
+        "btn_bg":   "#0f3460",
+    }
+    FM = ("Courier New", 9)
+    FL = ("Segoe UI", 9)
+    FB = ("Segoe UI", 12, "bold")
+    FT = ("Segoe UI", 8)
+
+    def __init__(self, inspector: InventoryInspector) -> None:
+        self._inspector = inspector
+        self._q:         queue.Queue     = queue.Queue()
+        self._root:      Optional[tk.Tk] = None
+        self._live       = True
+        self._current_hit: Optional[GoldHit] = None
+
+    def run(self) -> None:
+        self._build()
+        self._root.after(100, self._pump)
+        self._root.mainloop()
+
+    # --- build UI ----------------------------------------------------------
+
+    def _build(self) -> None:
+        r = tk.Tk()
+        self._root = r
+        r.title(f"{Config.APP_NAME} v{Config.APP_VERSION}")
+        r.configure(bg=self.C["bg"])
+        r.attributes("-topmost", True)
+        r.attributes("-alpha", Config.OVERLAY_ALPHA)
+        r.geometry(f"468x820+{Config.OVERLAY_X}+{Config.OVERLAY_Y}")
+        r.resizable(True, True)
+        r.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Header
+        hdr = tk.Frame(r, bg=self.C["bg_panel"], pady=6)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr,
+            text=f"{Config.APP_NAME}  v{Config.APP_VERSION}",
+            font=self.FB,
+            fg=self.C["gold"],
+            bg=self.C["bg_panel"],
+        ).pack()
+        self._status_lbl = tk.Label(
+            hdr, text="Idle",
+            font=self.FL, fg=self.C["muted"], bg=self.C["bg_panel"],
+        )
+        self._status_lbl.pack()
+
+        # Stats row
+        sf = tk.Frame(r, bg=self.C["bg"], pady=4)
+        sf.pack(fill="x", padx=6)
+        self._sv: dict = {}
+        for key, lbl in [
+            ("lap",     "Lap #"),
+            ("cells",   "Cells"),
+            ("hits",    "Hits"),
+            ("dual",    "Dual GF"),
+            ("best_f",  "Best +Flat"),
+            ("best_p",  "Best %"),
+            ("elapsed", "Time"),
+        ]:
+            cf = tk.Frame(sf, bg=self.C["bg_panel"], padx=4, pady=3)
+            cf.pack(side="left", expand=True, fill="x", padx=1)
+            tk.Label(
+                cf, text=lbl, font=self.FT,
+                fg=self.C["muted"], bg=self.C["bg_panel"],
+            ).pack()
+            v = tk.StringVar(value="0")
+            self._sv[key] = v
+            tk.Label(
+                cf, textvariable=v,
+                font=("Segoe UI", 10, "bold"),
+                fg=self.C["gold"], bg=self.C["bg_panel"],
+            ).pack()
+
+        # Current cell
+        tf = tk.Frame(r, bg=self.C["bg"])
+        tf.pack(fill="x", padx=6, pady=1)
+        tk.Label(
+            tf, text="Cell:",
+            font=self.FT, fg=self.C["muted"], bg=self.C["bg"],
+        ).pack(side="left")
+        self._cell_var = tk.StringVar(value="--")
+        tk.Label(
+            tf, textvariable=self._cell_var,
+            font=self.FM, fg=self.C["text"], bg=self.C["bg"],
+        ).pack(side="left", padx=4)
+
+        # Hit panel
+        self._hit_frame = tk.Frame(r, bg=self.C["hit_bg"], relief="groove", bd=2)
+        self._hit_frame.pack(fill="x", padx=6, pady=4)
+        self._hit_lbl = tk.Label(
+            self._hit_frame, text="No hits yet.",
+            font=("Segoe UI", 10, "bold"),
+            fg=self.C["gold"], bg=self.C["hit_bg"],
+            wraplength=430, justify="left", pady=6, padx=6,
+        )
+        self._hit_lbl.pack(fill="x")
+        self._cmp_lbl = tk.Label(
+            self._hit_frame, text="",
+            font=self.FM, fg=self.C["text"], bg=self.C["hit_bg"],
+            wraplength=430, justify="left", padx=6,
+        )
+        self._cmp_lbl.pack(fill="x")
+
+        # Dual GF banner (hidden by default)
+        self._dual_frame = tk.Frame(r, bg=self.C["dual_bg"], relief="groove", bd=3)
+        self._dual_lbl   = tk.Label(
+            self._dual_frame, text="",
+            font=("Segoe UI", 11, "bold"),
+            fg=self.C["dual_bdr"], bg=self.C["dual_bg"],
+            wraplength=430, justify="center", pady=8, padx=6,
+        )
+        self._dual_lbl.pack(fill="x")
+
+        # Primary buttons
+        bs = dict(
+            font=("Segoe UI", 10, "bold"),
+            relief="flat", padx=8, pady=4, cursor="hand2",
+        )
+        bf1 = tk.Frame(r, bg=self.C["bg"], pady=4)
+        bf1.pack(fill="x", padx=6)
+        self._btn_begin = tk.Button(
+            bf1, text="  BEGIN  (F6)",
+            bg=self.C["green"], fg="white",
+            command=self._toggle_begin, **bs,
+        )
+        self._btn_begin.pack(side="left", expand=True, fill="x", padx=2)
+        self._btn_next = tk.Button(
+            bf1, text="  NEXT  (F7)",
+            bg=self.C["btn_bg"], fg=self.C["muted"],
+            state="disabled", command=self._next, **bs,
+        )
+        self._btn_next.pack(side="left", expand=True, fill="x", padx=2)
+
+        # Secondary buttons
+        bf2 = tk.Frame(r, bg=self.C["bg"])
+        bf2.pack(fill="x", padx=6, pady=2)
+        for txt, cmd in [
+            ("HOLD (F8)",  self._hold),
+            ("Calibrate",  self._open_calibrate),
+            ("Pass List",  self._open_passlist),
+            ("Open Log",   self._open_log),
+        ]:
+            tk.Button(
+                bf2, text=txt, bg=self.C["btn_bg"],
+                fg=self.C["text"], command=cmd, **bs,
+            ).pack(side="left", expand=True, fill="x", padx=2)
+
+        # Hotkey hint
+        hk = tk.Frame(r, bg=self.C["bg_panel"], pady=2)
+        hk.pack(fill="x", padx=6, pady=2)
+        tk.Label(
+            hk,
+            text="F6=Begin/Halt   F7=Next   F8=Hold   ESC=Halt",
+            font=self.FT, fg=self.C["muted"], bg=self.C["bg_panel"],
+        ).pack()
+
+        # Live log
+        tk.Label(
+            r, text="Activity Log",
+            font=self.FT, fg=self.C["muted"], bg=self.C["bg"],
+        ).pack(anchor="w", padx=8)
+        self._log_box = scrolledtext.ScrolledText(
+            r, height=10, font=self.FM,
+            bg="#0d0d1a", fg=self.C["text"],
+            state="disabled", relief="flat",
+        )
+        self._log_box.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        # Hit history
+        tk.Label(
+            r, text="Hit History",
+            font=self.FT, fg=self.C["muted"], bg=self.C["bg"],
+        ).pack(anchor="w", padx=8)
+        self._hist_box = scrolledtext.ScrolledText(
+            r, height=6, font=self.FM,
+            bg="#0d0d1a", fg=self.C["gold"],
+            state="disabled", relief="flat",
+        )
+        self._hist_box.pack(fill="both", expand=False, padx=6, pady=(0, 6))
+
+        # Wire inspector callbacks
+        self._inspector.on_hit     = lambda h:          self._q.put(("hit",     h))
+        self._inspector.on_cell    = lambda c, ro, t:   self._q.put(("cell",    (c, ro, t)))
+        self._inspector.on_restock = lambda n:          self._q.put(("restock", n))
+        self._inspector.on_status  = lambda s:          self._q.put(("status",  s))
+        self._inspector.on_halted  = lambda:            self._q.put(("halted",))
+
+        self._reg_hotkeys()
+        self._root.after(500, self._tick_stats)
+
+    # --- hotkeys -----------------------------------------------------------
+
+    def _reg_hotkeys(self) -> None:
+        for key, fn in [
+            (Config.HOTKEY_BEGIN_HALT, self._toggle_begin),
+            (Config.HOTKEY_NEXT,       self._next),
+            (Config.HOTKEY_HOLD,       self._hold),
+            (Config.HOTKEY_HALT,       self._emergency),
+        ]:
+            try:
+                keyboard.add_hotkey(key, fn, suppress=False)
+            except Exception as exc:
+                log.warning(f"Hotkey {key} failed: {exc}")
+
+    # --- event pump --------------------------------------------------------
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                msg  = self._q.get_nowait()
+                kind = msg[0]
+                if kind == "hit":
+                    self._on_hit(msg[1])
+                elif kind == "cell":
+                    c, ro, _ = msg[1]
+                    self._cell_var.set(f"[col={c}, row={ro}]")
+                elif kind == "restock":
+                    self._log(f"=== Shelf restocked (lap #{msg[1]}) ===", "gold")
+                elif kind == "status":
+                    self._set_status(msg[1])
+                elif kind == "halted":
+                    self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
+                    self._btn_next.config(
+                        state="disabled",
+                        bg=self.C["btn_bg"],
+                        fg=self.C["muted"],
+                    )
+                    self._set_status("Halted")
+                    self._hide_dual_banner()
+        except queue.Empty:
+            pass
+        if self._live:
+            self._root.after(50, self._pump)
+
+    # --- hit display -------------------------------------------------------
+
+    def _on_hit(self, h: GoldHit) -> None:
+        self._current_hit = h
+        si = h.shelf_item
+        wi = h.worn_item
+
+        if h.is_dual_gf:
+            header = (
+                f"DUAL GF!  +{si.flat_gf} flat & +{si.pct_gf}%"
+                f"  -- confirm before passing"
+            )
+            self._hit_frame.config(bg=self.C["dual_bg"])
+            self._hit_lbl.config(
+                bg=self.C["dual_bg"], fg=self.C["dual_bdr"], text=header
+            )
+            self._show_dual_banner(si)
+        else:
+            header = f"+{si.flat_gf} Gold Find  --  '{si.name}'"
+            self._hit_frame.config(bg="#4a2a00")
+            self._hit_lbl.config(bg="#4a2a00", fg=self.C["gold"], text=header)
+            self._hide_dual_banner()
+
+        lines = [f"  Shelf: +{si.flat_gf} flat  +{si.pct_gf}%  [{si.name[:40]}]"]
+        if wi:
+            tag = " (PASSED)" if is_passed(wi) else ""
+            lines.append(
+                f"  Worn:  +{wi.flat_gf} flat  +{wi.pct_gf}%"
+                f"  [{wi.name[:40]}]{tag}"
+            )
+        self._cmp_lbl.config(
+            text="\n".join(lines),
+            bg=self._hit_frame["bg"],
+        )
+
+        next_txt = "  PASS  (F7)" if h.is_dual_gf else "  NEXT  (F7)"
+        self._btn_next.config(
+            state="normal",
+            bg=self.C["dual_bdr"] if h.is_dual_gf else self.C["accent"],
+            fg="white",
+            text=next_txt,
+        )
+
+        kind_tag = "DUAL" if h.is_dual_gf else "HIT"
+        hist = (
+            f"{h.timestamp[11:19]}  [{kind_tag}]  "
+            f"+{si.flat_gf}flat  +{si.pct_gf}%  "
+            f"[{h.col:2d},{h.row:2d}]  {si.name[:30]}\n"
+        )
+        self._append_hist(hist)
+        self._log(header, "accent" if h.is_dual_gf else "gold")
+        self._set_status(
+            "WAITING -- DUAL GF -- confirm before passing"
+            if h.is_dual_gf else
+            "WAITING -- press F7 to pass"
+        )
+
+    def _show_dual_banner(self, si: ParsedItem) -> None:
+        self._dual_lbl.config(
+            text=(
+                f"DUAL GOLD-FIND ITEM\n"
+                f"+{si.flat_gf} flat  AND  +{si.pct_gf}% percent\n"
+                f"This is RARE -- confirm before passing!\n"
+                f"Buy with Shift+Click, or press F7 to pass."
+            )
+        )
+        self._dual_frame.pack(fill="x", padx=6, pady=2)
+
+    def _hide_dual_banner(self) -> None:
+        try:
+            self._dual_frame.pack_forget()
+        except Exception:
+            pass
+
+    # --- button callbacks --------------------------------------------------
+
+    def _toggle_begin(self) -> None:
+        if self._inspector._active:
+            self._inspector.halt()
+            self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
+        else:
+            self._inspector.begin()
+            self._btn_begin.config(text="  HALT  (F6)", bg=self.C["accent"])
+            self._log("Walk started.", "green")
+            self._hide_dual_banner()
+
+    def _next(self) -> None:
+        h = self._current_hit
+        if h and h.is_dual_gf:
+            if not messagebox.askyesno(
+                "Pass on DUAL GF item?",
+                (
+                    f"Are you sure you want to PASS on this dual Gold-Find item?\n"
+                    f"+{h.shelf_item.flat_gf} flat AND +{h.shelf_item.pct_gf}%\n\n"
+                    f"Press NO to go back and buy it."
+                ),
+                default="no",
+            ):
+                return
+        self._inspector.user_next()
+        self._btn_next.config(
+            state="disabled",
+            text="  NEXT  (F7)",
+            bg=self.C["btn_bg"],
+            fg=self.C["muted"],
+        )
+        self._hide_dual_banner()
+        self._hit_frame.config(bg=self.C["hit_bg"])
+        self._hit_lbl.config(bg=self.C["hit_bg"])
+        self._cmp_lbl.config(bg=self.C["hit_bg"], text="")
+        self._log("Passed.", "muted")
+
+    def _hold(self) -> None:
+        self._inspector.hold_toggle()
+
+    def _emergency(self) -> None:
+        log.warning("HALT!")
+        self._inspector.halt()
+        self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
+        self._hide_dual_banner()
+        self._set_status("HALTED")
+
+    def _open_calibrate(self) -> None:
+        CalibrationWindow(self._root)
+
+    def _open_passlist(self) -> None:
+        PassListWindow(self._root)
+
+    def _open_log(self) -> None:
+        try:
+            os.startfile(str(_log_file))
+        except Exception:
+            messagebox.showinfo("Session log", str(_log_file))
+
+    # --- helpers -----------------------------------------------------------
+
+    def _set_status(self, msg: str) -> None:
+        self._status_lbl.config(text=msg)
+
+    def _log(self, msg: str, color: str = "text") -> None:
+        ts   = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        c    = self.C.get(color, self.C["text"])
+        self._log_box.config(state="normal")
+        self._log_box.insert("end", line)
+        tag = f"clr_{color}"
+        self._log_box.tag_config(tag, foreground=c)
+        self._log_box.tag_add(tag, f"end - {len(line) + 1}c", "end - 1c")
+        self._log_box.see("end")
+        self._log_box.config(state="disabled")
+
+    def _append_hist(self, line: str) -> None:
+        self._hist_box.config(state="normal")
+        self._hist_box.insert("end", line)
+        self._hist_box.see("end")
+        self._hist_box.config(state="disabled")
+
+    def _tick_stats(self) -> None:
+        s = self._inspector.stats
+        self._sv["lap"].set(str(s.lap_number))
+        self._sv["cells"].set(str(s.cells_visited))
+        self._sv["hits"].set(str(s.hits))
+        self._sv["dual"].set(str(s.dual_hits))
+        self._sv["best_f"].set(f"+{s.best_flat}")
+        self._sv["best_p"].set(f"+{s.best_pct}%")
+        self._sv["elapsed"].set(s.elapsed_str())
+        if self._live:
+            self._root.after(500, self._tick_stats)
+
+    def _on_close(self) -> None:
+        self._live = False
+        self._inspector.halt()
+        keyboard.unhook_all()
+        _save_prefs()
+        log.info("Overlay closed.")
+        self._root.destroy()
 
 
 # ---------------------------------------------------------------------------
