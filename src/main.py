@@ -119,7 +119,7 @@ if _missing:
 
 class Config:
     APP_NAME    = "GoldSense"
-    APP_VERSION = "1.3.0"
+    APP_VERSION = "1.3.1"  # bumped for logging hardening
 
     # Shelf grid geometry (pixels) -- overwritten by calibration
     SHELF_ORIGIN_X = 40
@@ -209,8 +209,10 @@ def _load_prefs() -> None:
                         "TOOLTIP_ANCHOR_X", "TOOLTIP_ANCHOR_Y"):
                 if key in data:
                     setattr(Config, key, data[key])
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("goldsense").warning(
+            "Failed to load prefs from %s: %s", Config.PREFS_FILE, exc, exc_info=True
+        )
 
 
 def _save_prefs() -> None:
@@ -225,8 +227,10 @@ def _save_prefs() -> None:
                  "TOOLTIP_ANCHOR_X", "TOOLTIP_ANCHOR_Y")}
         with open(Config.PREFS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("goldsense").warning(
+            "Failed to save prefs to %s: %s", Config.PREFS_FILE, exc, exc_info=True
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +252,33 @@ logging.basicConfig(
 )
 log = logging.getLogger("goldsense")
 log.info(f"{Config.APP_NAME} {Config.APP_VERSION} starting -- log: {_log_file}")
+
+
+def _install_global_exception_hooks() -> None:
+    """Route all uncaught exceptions into the session log.
+
+    This catches main-thread errors, worker-thread errors (where supported),
+    and makes debugging "silent" crashes much easier.
+    """
+
+    def _handle_uncaught(exc_type, exc_value, exc_tb):
+        log.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    sys.excepthook = _handle_uncaught
+
+    # Python 3.8+ provides threading.excepthook for worker threads.
+    try:
+        def _thread_excepthook(args):
+            log.critical(
+                "Uncaught thread exception in %s", getattr(args, "thread", None),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        threading.excepthook = _thread_excepthook  # type: ignore[attr-defined]
+    except Exception as exc:
+        log.warning("Failed to install threading.excepthook: %s", exc, exc_info=True)
+
+
+_install_global_exception_hooks()
 _load_prefs()
 
 
@@ -1295,6 +1326,11 @@ class OverlayWindow:
         r.resizable(True, True)
         r.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Route Tkinter callback errors into our logger instead of silently dying.
+        def _tk_report_callback_exception(exc_type, exc_value, exc_tb):
+            log.error("Tk callback exception", exc_info=(exc_type, exc_value, exc_tb))
+        r.report_callback_exception = _tk_report_callback_exception
+
         # Header
         hdr = tk.Frame(r, bg=self.C["bg_panel"], pady=6)
         hdr.pack(fill="x")
@@ -1642,4 +1678,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        log.critical("Fatal error in main(): %s", exc, exc_info=True)
+        raise
