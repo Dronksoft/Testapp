@@ -13,15 +13,20 @@ rem  GoldSense v2.0.0  --  Merchant Inventory Inspector
 rem  Vision-AI Edition.  Unzip anywhere, run INSTALL.bat, done.
 rem ================================================================
 
-set "SRC_DIR=%~dp0"
+rem  %~s0 gives the 8.3 short path of this .bat file -- no spaces,
+rem  no parentheses, safe for all cmd.exe block operations.
+for %%I in ("%~s0") do set "SRC_DIR=%%~dpI"
 if "%SRC_DIR:~-1%"=="\" set "SRC_DIR=%SRC_DIR:~0,-1%"
 
+rem  Install target: fixed clean path so we never run from a temp
+rem  extract folder with spaces or brackets in its name.
+rem  Override by setting GS_INSTALL_DIR before running, or pass as arg 1.
 if defined GS_INSTALL_DIR (
     set "INSTALL_DIR=%GS_INSTALL_DIR%"
 ) else if not "%~1"=="" (
     set "INSTALL_DIR=%~1"
 ) else (
-    set "INSTALL_DIR=%SRC_DIR%"
+    set "INSTALL_DIR=C:\GoldSense"
 )
 
 set "CONDA_DIR=%INSTALL_DIR%\_conda"
@@ -68,7 +73,8 @@ if exist "%ENV_PYTHON%" (
 ) else (
     echo  Status: [NOT SET UP]  -- run option 1 first
 )
-echo  Dir: %INSTALL_DIR%
+echo  Source:  %SRC_DIR%
+echo  Install: %INSTALL_DIR%
 echo  +--------------------------------------------------------------+
 echo.
 
@@ -89,8 +95,11 @@ goto :MENU
 :DO_INSTALL
 echo  --- SETUP ---
 echo.
+echo  Source (scripts): %SRC_DIR%
+echo  Install (env):    %INSTALL_DIR%
+echo.
 if exist "%ENV_PYTHON%" (
-    set "REINSTALL="
+    set "REINSTALL=N"
     set /p "REINSTALL=  Reinstall from scratch? Y or N: "
     if /I "%REINSTALL%"=="Y" (
         rd /s /q "%ENV_DIR%"
@@ -132,7 +141,7 @@ if not exist "%ENV_PYTHON%" (
     goto :MENU
 )
 if not exist "%SRC_DIR%\src\main.py" (
-    echo  [ERROR] src\main.py not found.
+    echo  [ERROR] src\main.py not found in: %SRC_DIR%\src\
     call :pause_return
     goto :MENU
 )
@@ -177,7 +186,7 @@ echo  ^|   2^)  Full clean rebuild                                     ^|
 echo  ^|   3^)  Back                                                   ^|
 echo  +--------------------------------------------------------------+
 echo.
-set "RCHOICE="
+set "RCHOICE=3"
 set /p "RCHOICE=  Enter option (1-3): "
 if "%RCHOICE%"=="1" (
     call :write_pinfile
@@ -186,7 +195,7 @@ if "%RCHOICE%"=="1" (
     goto :MENU
 )
 if "%RCHOICE%"=="2" (
-    set "CONFIRM="
+    set "CONFIRM=NO"
     set /p "CONFIRM=  Type YES to confirm full rebuild: "
     if /I "%CONFIRM%"=="YES" (
         if exist "%ENV_DIR%" rd /s /q "%ENV_DIR%"
