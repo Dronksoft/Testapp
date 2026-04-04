@@ -13,10 +13,17 @@ rem  GoldSense v2.0.0  --  Merchant Inventory Inspector
 rem  Vision-AI Edition.  Unzip anywhere, run INSTALL.bat, done.
 rem ================================================================
 
+rem  Full long path for everything (quoted throughout)
 set "SRC_DIR=%~dp0"
 if "%SRC_DIR:~-1%"=="\" set "SRC_DIR=%SRC_DIR:~0,-1%"
 
+rem  Short (8.3) path used ONLY for conda installer /D= flag,
+rem  which does not accept quotes and breaks on spaces/parens.
+for %%I in ("%~s0") do set "SRC_DIR_S=%%~dpI"
+if "%SRC_DIR_S:~-1%"=="\" set "SRC_DIR_S=%SRC_DIR_S:~0,-1%"
+
 set "CONDA_DIR=%SRC_DIR%\_conda"
+set "CONDA_DIR_S=%SRC_DIR_S%\_conda"
 set "ENV_DIR=%SRC_DIR%\env"
 set "TOOLS_DIR=%SRC_DIR%\_tools"
 set "BACKUPS_DIR=%TOOLS_DIR%\backups"
@@ -230,7 +237,8 @@ set "MINI_URL=https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_
 set "MINI_INST=%TOOLS_DIR%\miniconda_installer.exe"
 call :grab "%MINI_INST%" "%MINI_URL%"
 if not exist "%MINI_INST%" ( echo  [ERROR] Miniconda download failed. & exit /b 1 )
-start /wait "" "%MINI_INST%" /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S /D=%CONDA_DIR%
+rem  /D= must NOT be quoted -- use 8.3 short path to handle spaces/parens
+start /wait "" "%MINI_INST%" /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S /D=%CONDA_DIR_S%
 del "%MINI_INST%" >nul 2>&1
 if not exist "%CONDA_EXE%" ( echo  [ERROR] Miniconda install failed. & exit /b 1 )
 exit /b 0
