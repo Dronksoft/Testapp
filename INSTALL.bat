@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions
 chcp 65001 >nul
 title GoldSense v2.0.0
 
@@ -56,15 +56,15 @@ echo  +--------------------------------------------------------------+
 echo  ^|  GoldSense  v%APP_VERSION%  --  Merchant Inventory Inspector        ^|
 echo  ^|                       Vision-AI Edition                      ^|
 echo  +--------------------------------------------------------------+
-echo  ^|   1)  Setup     -- First-time installation                  ^|
-echo  ^|   2)  Launch    -- Start the inspector                      ^|
-echo  ^|   3)  Update    -- Upgrade packages                         ^|
-echo  ^|   4)  Repair    -- Fix / restore environment                ^|
-echo  ^|   5)  About     -- How it works                             ^|
-echo  ^|   6)  Exit                                                   ^|
+echo  ^|   1^)  Setup     -- First-time installation                  ^|
+echo  ^|   2^)  Launch    -- Start the inspector                      ^|
+echo  ^|   3^)  Update    -- Upgrade packages                         ^|
+echo  ^|   4^)  Repair    -- Fix / restore environment                ^|
+echo  ^|   5^)  About     -- How it works                             ^|
+echo  ^|   6^)  Exit                                                   ^|
 echo  +--------------------------------------------------------------+
 if exist "%ENV_PYTHON%" (
-    echo  Status: [READY]   env at %INSTALL_DIR%\env\
+    echo  Status: [READY]   env at %ENV_DIR%
 ) else (
     echo  Status: [NOT SET UP]  -- run option 1 first
 )
@@ -76,12 +76,12 @@ set "CHOICE="
 set /p "CHOICE=  Enter option (1-6): "
 echo.
 
-if "!CHOICE!"=="1" goto :DO_INSTALL
-if "!CHOICE!"=="2" goto :DO_LAUNCH
-if "!CHOICE!"=="3" goto :DO_UPDATE
-if "!CHOICE!"=="4" goto :DO_REPAIR
-if "!CHOICE!"=="5" goto :DO_ABOUT
-if "!CHOICE!"=="6" goto :EXIT
+if "%CHOICE%"=="1" goto :DO_INSTALL
+if "%CHOICE%"=="2" goto :DO_LAUNCH
+if "%CHOICE%"=="3" goto :DO_UPDATE
+if "%CHOICE%"=="4" goto :DO_REPAIR
+if "%CHOICE%"=="5" goto :DO_ABOUT
+if "%CHOICE%"=="6" goto :EXIT
 echo  Invalid choice.
 timeout /t 2 >nul
 goto :MENU
@@ -92,7 +92,7 @@ echo.
 if exist "%ENV_PYTHON%" (
     set "REINSTALL="
     set /p "REINSTALL=  Reinstall from scratch? Y or N: "
-    if /I "!REINSTALL!"=="Y" (
+    if /I "%REINSTALL%"=="Y" (
         rd /s /q "%ENV_DIR%"
     ) else (
         echo  Skipped. Use option 3 to update.
@@ -110,8 +110,8 @@ echo.
 echo  +--------------------------------------------------------------+
 echo  ^|  SETUP COMPLETE!                                             ^|
 echo  ^|  1. Open The Hell 4 and enter the merchant shop.            ^|
-echo  ^|  2. Launch (option 2), click Calibrate, drag shop area.    ^|
-echo  ^|  3. Press BEGIN (F6). moondream2 downloads on first run.   ^|
+echo  ^|  2. Launch (option 2^), click Calibrate, drag shop area.    ^|
+echo  ^|  3. Press BEGIN (F6^). moondream2 downloads on first run.   ^|
 echo  ^|  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt       ^|
 echo  +--------------------------------------------------------------+
 call :pause_return
@@ -172,23 +172,23 @@ cls
 echo.
 echo  +--------------------------------------------------------------+
 echo  ^|  REPAIR                                                      ^|
-echo  ^|   1)  Reinstall packages                                     ^|
-echo  ^|   2)  Full clean rebuild                                     ^|
-echo  ^|   3)  Back                                                   ^|
+echo  ^|   1^)  Reinstall packages                                     ^|
+echo  ^|   2^)  Full clean rebuild                                     ^|
+echo  ^|   3^)  Back                                                   ^|
 echo  +--------------------------------------------------------------+
 echo.
 set "RCHOICE="
 set /p "RCHOICE=  Enter option (1-3): "
-if "!RCHOICE!"=="1" (
+if "%RCHOICE%"=="1" (
     call :write_pinfile
     "%ENV_PYTHON%" -m pip install --prefer-binary --force-reinstall -r "%PINFILE%"
     call :pause_return
     goto :MENU
 )
-if "!RCHOICE!"=="2" (
+if "%RCHOICE%"=="2" (
     set "CONFIRM="
     set /p "CONFIRM=  Type YES to confirm full rebuild: "
-    if /I "!CONFIRM!"=="YES" (
+    if /I "%CONFIRM%"=="YES" (
         if exist "%ENV_DIR%" rd /s /q "%ENV_DIR%"
         call :step_env
         call :step_packages
