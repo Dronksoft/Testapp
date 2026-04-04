@@ -54,7 +54,7 @@ echo  ^|  GoldSense  v%APP_VERSION%  --  Merchant Inventory Inspector        ^|
 echo  ^|                       Vision-AI Edition                      ^|
 echo  +--------------------------------------------------------------+
 echo  ^|   1^)  Setup     -- First-time installation                  ^|
-echo  ^|   2^)  Launch    -- Start the inspector                      ^|
+echo  ^|   2^)  Launch    -- Start GoldSense                          ^|
 echo  ^|   3^)  Update    -- Upgrade packages                         ^|
 echo  ^|   4^)  Repair    -- Fix / restore environment                ^|
 echo  ^|   5^)  About     -- How it works                             ^|
@@ -202,7 +202,7 @@ cls
 echo.
 echo  GoldSense v%APP_VERSION% -- Vision-AI Edition
 echo.
-echo  Scans the merchant shelf in The Hell 4 using two stages:
+echo  Scouts the merchant shelf in The Hell 4 using two stages:
 echo.
 echo  STAGE 1  OpenCV blob detection finds item squares by their
 echo           reddish-brown borders against the dark background.

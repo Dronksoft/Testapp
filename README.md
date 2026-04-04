@@ -29,7 +29,7 @@ A self-contained, portable Python overlay for **The Hell 4** that automatically 
 3. **Start The Hell 4** and open the merchant's Trade window.
 4. **Double-click `run.bat`** (or choose option 2 in INSTALL.bat).
 5. Overlay appears → click **Calibrate** → **Select Region by Drag** over the shop grid → **Apply**.
-6. Press **BEGIN** (or **F6**) and the inspector starts.
+6. Press **BEGIN** (or **F6**) and the scan engine starts.
 
 > moondream2 is downloaded once into `~/.cache/huggingface/` — subsequent runs start instantly.
 
@@ -49,7 +49,7 @@ STAGE 2 — AI Stat Reading  (per blob)
   If GF > 0:
     Hold ALT → screenshot comparison tooltip (two items side-by-side).
     Ask: "LEFT=<shelf_gf> RIGHT=<equipped_gf>"
-    If shelf >= equipped, OR equipped slot has no GF → PAUSE for you.
+    If shelf >= equipped, OR equipped slot has no GF → PAUSE for operator.
 
 After all blobs scanned:
   Press R to restock shelf → repeat.
@@ -76,7 +76,7 @@ All controls also available as overlay buttons.
 |-----------|--------|
 | Shelf flat GF ≥ worn flat GF | **Pause** |
 | Worn slot shows no GF data | **Pause** (nothing to compare against) |
-| Item is on Pass List | **Pause** regardless of stats |
+| Item is on Watch List | **Pause** regardless of stats |
 | Shelf flat GF < worn flat GF | Pass silently |
 
 ---
@@ -105,13 +105,13 @@ Default values work for standard TH4 theme — if your colours look different:
 
 ---
 
-## Pass List
+## Watch List
 
-Items on the pass list are always surfaced regardless of GF stats.  
-Useful for named uniques you'll keep no matter what.
+Items on the watch list are always surfaced regardless of GF stats.  
+Useful for named items you want to be notified about regardless of rolls.
 
 - Partial name match, case-insensitive.
-- Manage via the **Pass List** button in the overlay.
+- Manage via the **Watch List** button in the overlay.
 - Saved to `_tools/prefs.json`.
 
 ---
@@ -142,7 +142,7 @@ GoldSense\
 +-- env\             <- Python environment  (created by INSTALL.bat)
 +-- _conda\          <- Local Miniconda     (created by INSTALL.bat)
 +-- _tools\
-    +-- prefs.json    <- Saved calibration + pass list
+    +-- prefs.json    <- Saved calibration + watch list
 +-- logs\            <- Session logs and tooltip captures
 ```
 
