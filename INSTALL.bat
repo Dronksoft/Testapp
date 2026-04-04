@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
-title GoldSense v1.1.0
+title GoldSense v2.0.0
 
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYTHONNOUSERSITE=1"
@@ -9,8 +9,8 @@ set "PYTHONUTF8=1"
 set "PIP_ROOT_USER_ACTION=ignore"
 
 rem ================================================================
-rem  GoldSense v1.1.0  --  Merchant Inventory Inspector
-rem  Fully portable. Unzip anywhere, run SETUP.bat, done.
+rem  GoldSense v2.0.0  --  Merchant Inventory Inspector
+rem  Vision-AI Edition.  Unzip anywhere, run INSTALL.bat, done.
 rem ================================================================
 
 set "SRC_DIR=%~dp0"
@@ -34,15 +34,8 @@ set "PINFILE=%TOOLS_DIR%\pinned.txt"
 set "CONDA_EXE=%CONDA_DIR%\Scripts\conda.exe"
 set "ENV_PYTHON=%ENV_DIR%\python.exe"
 
-set "APP_VERSION=1.1.0"
+set "APP_VERSION=2.0.0"
 set "PYTHON_VER=3.11"
-
-set "PIN_PILLOW=10.3.0"
-set "PIN_NUMPY=1.26.4"
-set "PIN_KEYBOARD=0.13.5"
-set "PIN_PYAUTOGUI=0.9.54"
-set "PIN_RAPIDOCR=1.3.22"
-set "PIN_ONNXRUNTIME=1.19.2"
 
 if not exist "%INSTALL_DIR%"  mkdir "%INSTALL_DIR%"
 if not exist "%TOOLS_DIR%"    mkdir "%TOOLS_DIR%"
@@ -60,7 +53,8 @@ rem ================================================================
 cls
 echo.
 echo  +--------------------------------------------------------------+
-echo  ^|  GoldSense  v%APP_VERSION%  --  Merchant Inventory Inspector         ^|
+echo  ^|  GoldSense  v%APP_VERSION%  --  Merchant Inventory Inspector        ^|
+echo  ^|                       Vision-AI Edition                      ^|
 echo  +--------------------------------------------------------------+
 echo  ^|   1)  Setup     -- First-time installation                  ^|
 echo  ^|   2)  Launch    -- Start the inspector                      ^|
@@ -116,8 +110,8 @@ echo.
 echo  +--------------------------------------------------------------+
 echo  ^|  SETUP COMPLETE!                                             ^|
 echo  ^|  1. Open The Hell 4 and enter the merchant shop.            ^|
-echo  ^|  2. Launch (option 2), click Calibrate, set grid.          ^|
-echo  ^|  3. Press BEGIN (F6) and let it walk!                       ^|
+echo  ^|  2. Launch (option 2), click Calibrate, drag shop area.    ^|
+echo  ^|  3. Press BEGIN (F6). moondream2 downloads on first run.   ^|
 echo  ^|  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt       ^|
 echo  +--------------------------------------------------------------+
 call :pause_return
@@ -142,10 +136,13 @@ if not exist "%SRC_DIR%\src\main.py" (
     call :pause_return
     goto :MENU
 )
+
 "%ENV_PYTHON%" --version
 echo.
 echo  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt
+echo  Note: moondream2 (~1.7 GB) downloads on first run -- be patient!
 echo.
+
 "%ENV_PYTHON%" "%SRC_DIR%\src\main.py"
 set "EC=%ERRORLEVEL%"
 echo.
@@ -206,12 +203,19 @@ goto :MENU
 :DO_ABOUT
 cls
 echo.
-echo  GoldSense v%APP_VERSION%
-echo  Walks the merchant's shelf grid looking for flat +Gold Find affixes.
-echo  Compares shelf items against currently worn gear (via ALT comparison).
-echo  Pauses only when the shelf item beats or matches worn gear.
-echo  Dual GF items (flat + %%) require manual confirmation before passing.
-echo  Pass list bypasses worn-item comparison for specific named items.
+echo  GoldSense v%APP_VERSION% -- Vision-AI Edition
+echo.
+echo  Scans the merchant shelf in The Hell 4 using two stages:
+echo.
+echo  STAGE 1  OpenCV blob detection finds item squares by their
+echo           reddish-brown borders against the dark background.
+echo.
+echo  STAGE 2  moondream2 (local vision model, ~1.7 GB) reads each
+echo           tooltip screenshot and the ALT comparison screenshot.
+echo           No regex, no fixed grid -- works across UI changes.
+echo.
+echo  Pauses only when the shelf item beats or ties worn gear.
+echo  All purchases are made manually -- no Shift+Click automation.
 echo.
 echo  Hotkeys: F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt
 echo.
@@ -250,7 +254,7 @@ if not exist "%ENV_PYTHON%" ( echo  [ERROR] python.exe missing after create. & e
 exit /b 0
 
 :step_packages
-echo  [3/3] Packages
+echo  [3/3] Packages  (torch may take a few minutes)
 "%ENV_PYTHON%" -m pip install --quiet -U pip setuptools wheel
 call :write_pinfile
 "%ENV_PYTHON%" -m pip install --prefer-binary --upgrade-strategy only-if-needed -r "%PINFILE%"
@@ -264,12 +268,17 @@ exit /b 0
 
 :write_pinfile
 (
-    echo Pillow^>=%PIN_PILLOW%
-    echo numpy^>=%PIN_NUMPY%
-    echo keyboard^>=%PIN_KEYBOARD%
-    echo pyautogui^>=%PIN_PYAUTOGUI%
-    echo rapidocr-onnxruntime^>=%PIN_RAPIDOCR%
-    echo onnxruntime^>=%PIN_ONNXRUNTIME%
+    echo Pillow^>=10.3.0
+    echo numpy^>=1.26.0
+    echo keyboard^>=0.13.5
+    echo pyautogui^>=0.9.54
+    echo opencv-python^>=4.9.0
+    echo transformers^>=4.40.0
+    echo torch^>=2.2.0
+    echo huggingface-hub^>=0.22.0
+    echo accelerate^>=0.29.0
+    echo rapidocr-onnxruntime^>=1.3.22
+    echo onnxruntime^>=1.19.2
 ) > "%PINFILE%"
 exit /b 0
 

@@ -1,1685 +1,1034 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-  GoldSense  v1.3.0  --  Merchant Inventory Inspector
-  Self-contained, self-hosted, single-file application.
+  GoldSense  v2.0.0  --  Merchant Inventory Inspector  (Vision-AI Edition)
+  Self-contained, single-file application.
 =============================================================================
-  HOW IT WORKS
-  ------------
-  1.  Open the merchant's trade window in-game.
-  2.  Run this script. An overlay window appears.
-  3.  Click "Calibrate" and drag a rectangle over the ENTIRE merchant
-      grid -- top-left corner to bottom-right corner.
-      Cell size is derived automatically from the drag area + grid counts.
-  4.  Press BEGIN (or F6) to start scanning the inventory.
-  5.  Before hovering, GoldSense captures a screenshot of the full grid
-      and detects which cells are occupied via pixel-colour hashing.
-      Contiguous same-coloured regions are grouped into item "blobs".
-      Each unique blob is visited ONCE at its centroid -- multi-tile
-      items are only read a single time, not once per cell.
-  6.  For each unique blob:
-        a) Move cursor to blob centroid -> wait -> capture tooltip.
-           The capture region is centred around the cursor, not a fixed
-           offset, and adjusts automatically near screen edges.
-        b) Quick scan for gold-find text.
-        c) If found -> hold ALT -> capture comparison tooltip.
-        d) Parse BOTH the shelf item AND the currently worn item.
-        e) Pause when: shelf_flat_gf >= worn_flat_gf
-                       OR worn slot is on the PASS LIST
-                       OR item has BOTH flat + % gold find (DUAL -- rare).
-  7.  When a qualifying item is spotted:
-        - Cursor stays on that blob.
-        - Overlay shows detected values.
-        - Inspector PAUSES and waits for your decision.
-  8.  Buy (Shift+Click yourself) or pass.
-  9.  Press NEXT (overlay button or F7) to resume.
-  10. After all blobs are checked the inspector presses R to restock
-      and loops from step 5.
 
-  PASS LIST
-  ---------
-  Items on the pass list bypass the worn-item comparison entirely.
-  Useful for slots you intend to keep regardless of stats.
+  WHAT CHANGED FROM v1
+  --------------------
+  v1 walked a fixed calibrated grid cell-by-cell using OCR regex.
+  v2 is fundamentally different:
 
-  KEY CONTROLS (global hotkeys)
-  F6   --  Begin / Halt toggle
-  F7   --  Next / Pass after a hit
-  F8   --  Hold / Resume
-  ESC  --  Immediate halt
+  STAGE 1 -- Shelf Detection (OpenCV blob analysis)
+    Screenshot the entire trade window.
+    Find every "item blob" -- the reddish-brown bordered item squares that
+    contrast against the dark grey background -- using HSV colour masking
+    and contour detection.  No grid calibration needed.
+
+  STAGE 2 -- AI Stat Reading (moondream2, local, no API key)
+    For each detected blob:
+      a) Move cursor to blob centre -> screenshot the tooltip that pops up.
+      b) Ask the local vision model:
+           "Does this tooltip show a flat bonus to gold found (not percent)?
+            Reply with just the integer, e.g. 14, or 0 if not present."
+      c) If GF > 0:
+           Hold ALT -> screenshot comparison tooltip.
+           Ask:  "Left item flat gold find?  Right item flat gold find?
+                  Reply: LEFT=<n> RIGHT=<n>"
+           If shelf >= equipped OR equipped slot has no GF -> pause for you.
+
+  WHY AI?
+  -------
+  The game's background, item art, font and tooltip layout change between
+  patches and mod versions.  A regex over OCR output breaks every time.
+  A small vision-language model describes what it *sees*, so it stays
+  correct even when pixel-level appearance drifts.
+
+  MODEL
+  -----
+  moondream2 (vikhyatk/moondream2) -- ~1.7 GB download once to
+  ~/.cache/huggingface/.  CPU-capable; GPU accelerated if available.
+  Fallback: if the model is unavailable, RapidOCR + regex is used
+  automatically so the tool is never left completely non-functional.
+
+  CONTROLS
+  --------
+  F6  Begin / Halt        F7  Next (pass current hit)
+  F8  Hold / Resume       ESC Emergency halt
 
   SAFETY
   ------
-  The inspector NEVER Shift+Clicks.  All purchases are done manually by you.
-
-  SETUP
-  -----
-  Run INSTALL.bat first, then option 2 to launch.
+  GoldSense NEVER Shift+Clicks.  All purchases are made manually by you.
 =============================================================================
 """
 
-import sys
-import os
-import re
-import time
-import json
-import queue
-import logging
-import threading
-import datetime
+import sys, os, re, time, json, queue, logging, threading, datetime
+import traceback
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Set
+from typing import Optional, List, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------------
-#  Dependency check
+#  Dependency gate
 # ---------------------------------------------------------------------------
-_missing: List[str] = []
+_MISSING: list = []
 try:
-    from PIL import Image, ImageGrab
+    import tkinter as tk
+    from tkinter import ttk, messagebox, scrolledtext
 except ImportError:
-    _missing.append("Pillow>=10.3.0")
+    _MISSING.append("tkinter (stdlib -- reinstall Python with tk support)")
+
 try:
+    from PIL import Image, ImageGrab, ImageDraw
     import numpy as np
 except ImportError:
-    _missing.append("numpy>=1.26.0")
+    _MISSING.append("Pillow / numpy")
+
+try:
+    import cv2
+except ImportError:
+    _MISSING.append("opencv-python")
+
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.02
+except ImportError:
+    _MISSING.append("pyautogui")
+
 try:
     import keyboard
 except ImportError:
-    _missing.append("keyboard>=0.13.5")
-try:
-    import pyautogui
-    pyautogui.FAILSAFE = False
-    pyautogui.PAUSE    = 0.0
-except ImportError:
-    _missing.append("pyautogui>=0.9.54")
-try:
-    from rapidocr_onnxruntime import RapidOCR
-except ImportError:
-    _missing.append("rapidocr-onnxruntime>=1.3.22")
-try:
-    import tkinter as tk
-    from tkinter import ttk, scrolledtext, messagebox
-except ImportError:
-    _missing.append("tkinter (built-in -- check Python installation)")
+    _MISSING.append("keyboard")
 
-if _missing:
-    print("=" * 60)
-    print("  MISSING PACKAGES -- run INSTALL.bat first!")
-    print("=" * 60)
-    for p in _missing:
-        print(f"    pip install {p}")
-    print()
-    input("Press ENTER to exit...")
+if _MISSING:
+    msg = "GoldSense -- missing dependencies:\n\n" + "\n".join(f"  {m}" for m in _MISSING)
+    msg += "\n\nRun INSTALL.bat -> option 1 to set up the environment."
+    try:
+        import tkinter as tk; from tkinter import messagebox
+        r = tk.Tk(); r.withdraw()
+        messagebox.showerror("GoldSense -- Missing Packages", msg); r.destroy()
+    except Exception:
+        print(msg)
     sys.exit(1)
 
-
 # ---------------------------------------------------------------------------
-#  CONFIG
+#  AI backend  (lazy-loaded on first use)
 # ---------------------------------------------------------------------------
+_AI_BACKEND = None
+_MD_MODEL   = None
+_MD_TOKENIZER = None
 
-class Config:
-    APP_NAME    = "GoldSense"
-    APP_VERSION = "1.3.1"  # bumped for logging hardening
-
-    # Shelf grid geometry (pixels) -- overwritten by calibration
-    SHELF_ORIGIN_X = 40
-    SHELF_ORIGIN_Y = 108
-    CELL_W         = 29
-    CELL_H         = 29
-    SHELF_COLS     = 10
-    SHELF_ROWS     = 14
-
-    # Tooltip capture -- cursor-local, screen-edge aware
-    HOVER_DELAY_MS = 180
-    ALT_DELAY_MS   = 220
-    TOOLTIP_W      = 450      # capture width  (px)
-    TOOLTIP_H      = 350      # capture height (px)
-    # Preferred anchor: tooltip appears above-left of cursor in TH4.
-    # The capture box is positioned so the cursor sits near its
-    # bottom-right quadrant, giving maximum room for the tooltip text.
-    TOOLTIP_ANCHOR_X = 380    # cursor offset from left edge of capture box
-    TOOLTIP_ANCHOR_Y = 290    # cursor offset from top  edge of capture box
-
-    # Blob detection (unique-item deduplication)
-    # Cells whose centre pixel hash matches an already-seen hash are skipped.
-    # EMPTY_LUMA_THRESH: cells darker than this are treated as empty slots.
-    EMPTY_LUMA_THRESH  = 22   # 0-255; increase if dark items are being skipped
-    BLOB_SAMPLE_RADIUS = 3    # px radius around cell centre sampled for hashing
-
-    # Gold-find detection patterns
-    FLAT_GF_PATTERNS = [
-        r"\+\s*(\d+)(?:\s*-\s*\d+)?\s*(?:to\s+)?gold\s*find",
-        r"\+\s*(\d+)(?:\s*-\s*\d+)?\s*gold\s+found",
-        r"gold\s*find\s*[:\+]\s*(\d+)",
-        r"\+\s*(\d+)\s*(?:to\s+)?(?:extra\s+)?gold",
-    ]
-    PCT_GF_PATTERNS = [
-        r"\+\s*(\d+)\s*%\s*(?:to\s+)?gold\s*find",
-        r"\+\s*(\d+)\s*%\s*gold\s+found",
-        r"(\d+)\s*%\s*(?:extra\s+)?gold\s*find",
-        r"(\d+)\s*%\s*(?:to\s+)?gold\s*found",
-    ]
-
-    MIN_GOLD_FIND = 1
-
-    # Comparison tooltip split markers
-    WORN_MARKERS  = ["equipped", "currently equipped", "worn", "eq:"]
-    SHELF_MARKERS = ["selected", "shop item", "buy price", "shift click to buy"]
-
-    # Pass list -- partial name match, case-insensitive
-    PASS_LIST: List[str] = [
-        "ring of celestial castles",
-        "ring of the sun",
-    ]
-
-    # Restock
-    RESTOCK_KEY      = "r"
-    RESTOCK_DELAY_MS = 600
-
-    # Hotkeys
-    HOTKEY_BEGIN_HALT = "f6"
-    HOTKEY_NEXT       = "f7"
-    HOTKEY_HOLD       = "f8"
-    HOTKEY_HALT       = "escape"
-
-    # Paths
-    LOG_DIR    = Path(__file__).resolve().parent.parent / "logs"
-    PREFS_FILE = Path(__file__).resolve().parent.parent / "_tools" / "prefs.json"
-
-    # Overlay
-    OVERLAY_X     = 20
-    OVERLAY_Y     = 20
-    OVERLAY_ALPHA = 0.90
-
-
-# ---------------------------------------------------------------------------
-#  STATE PERSISTENCE
-# ---------------------------------------------------------------------------
-
-def _load_prefs() -> None:
+def _load_ai_backend(log):
+    global _AI_BACKEND, _MD_MODEL, _MD_TOKENIZER
+    if _AI_BACKEND is not None:
+        return _AI_BACKEND
     try:
-        if Config.PREFS_FILE.exists():
-            with open(Config.PREFS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for key in ("SHELF_ORIGIN_X", "SHELF_ORIGIN_Y", "CELL_W", "CELL_H",
-                        "SHELF_COLS", "SHELF_ROWS", "HOVER_DELAY_MS",
-                        "ALT_DELAY_MS", "MIN_GOLD_FIND", "PASS_LIST",
-                        "EMPTY_LUMA_THRESH", "BLOB_SAMPLE_RADIUS",
-                        "TOOLTIP_W", "TOOLTIP_H",
-                        "TOOLTIP_ANCHOR_X", "TOOLTIP_ANCHOR_Y"):
-                if key in data:
-                    setattr(Config, key, data[key])
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch
+        log.info("Loading moondream2 vision model (first run downloads ~1.7 GB)...")
+        _MD_TOKENIZER = AutoTokenizer.from_pretrained(
+            "vikhyatk/moondream2", trust_remote_code=True, revision="2025-01-09")
+        _MD_MODEL = AutoModelForCausalLM.from_pretrained(
+            "vikhyatk/moondream2", trust_remote_code=True, revision="2025-01-09",
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else None,
+            low_cpu_mem_usage=True)
+        _MD_MODEL.eval()
+        log.info("moondream2 loaded OK -- using AI backend.")
+        _AI_BACKEND = "moondream"
+        return "moondream"
     except Exception as exc:
-        logging.getLogger("goldsense").warning(
-            "Failed to load prefs from %s: %s", Config.PREFS_FILE, exc, exc_info=True
-        )
-
-
-def _save_prefs() -> None:
+        log.warning("moondream2 unavailable (%s) -- falling back to OCR.", exc)
     try:
-        Config.PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        data = {k: getattr(Config, k) for k in
-                ("SHELF_ORIGIN_X", "SHELF_ORIGIN_Y", "CELL_W", "CELL_H",
-                 "SHELF_COLS", "SHELF_ROWS", "HOVER_DELAY_MS",
-                 "ALT_DELAY_MS", "MIN_GOLD_FIND", "PASS_LIST",
-                 "EMPTY_LUMA_THRESH", "BLOB_SAMPLE_RADIUS",
-                 "TOOLTIP_W", "TOOLTIP_H",
-                 "TOOLTIP_ANCHOR_X", "TOOLTIP_ANCHOR_Y")}
-        with open(Config.PREFS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as exc:
-        logging.getLogger("goldsense").warning(
-            "Failed to save prefs to %s: %s", Config.PREFS_FILE, exc, exc_info=True
-        )
+        from rapidocr_onnxruntime import RapidOCR
+        _AI_BACKEND = "ocr"
+        log.info("OCR fallback backend active.")
+        return "ocr"
+    except Exception as exc2:
+        log.error("No AI or OCR backend available: %s", exc2)
+        _AI_BACKEND = "none"
+        return "none"
 
 
-# ---------------------------------------------------------------------------
-#  LOGGING
-# ---------------------------------------------------------------------------
-
-Config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-_run_ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-_log_file = Config.LOG_DIR / f"session_{_run_ts}.txt"
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)-8s] %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(str(_log_file), encoding="utf-8"),
-    ],
-)
-log = logging.getLogger("goldsense")
-log.info(f"{Config.APP_NAME} {Config.APP_VERSION} starting -- log: {_log_file}")
-
-
-def _install_global_exception_hooks() -> None:
-    """Route all uncaught exceptions into the session log.
-
-    This catches main-thread errors, worker-thread errors (where supported),
-    and makes debugging "silent" crashes much easier.
-    """
-
-    def _handle_uncaught(exc_type, exc_value, exc_tb):
-        log.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
-
-    sys.excepthook = _handle_uncaught
-
-    # Python 3.8+ provides threading.excepthook for worker threads.
-    try:
-        def _thread_excepthook(args):
-            log.critical(
-                "Uncaught thread exception in %s", getattr(args, "thread", None),
-                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
-            )
-        threading.excepthook = _thread_excepthook  # type: ignore[attr-defined]
-    except Exception as exc:
-        log.warning("Failed to install threading.excepthook: %s", exc, exc_info=True)
-
-
-_install_global_exception_hooks()
-_load_prefs()
-
-
-# ---------------------------------------------------------------------------
-#  DATA CLASSES
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ParsedItem:
-    name:     str = ""
-    flat_gf:  int = 0
-    pct_gf:   int = 0
-    raw_text: str = ""
-
-
-@dataclass
-class ItemBlob:
-    """
-    Represents a unique item detected in the grid.
-
-    cells   -- all (col, row) pairs belonging to this blob
-    cx, cy  -- screen pixel centroid (where cursor is moved to)
-    phash   -- the pixel-colour hash that identifies this blob
-    """
-    cells:  List[Tuple[int, int]]
-    cx:     int
-    cy:     int
-    phash:  int
-
-    @property
-    def col(self) -> int:
-        return min(c for c, _ in self.cells)
-
-    @property
-    def row(self) -> int:
-        return min(r for _, r in self.cells)
-
-    def label(self) -> str:
-        c0, r0 = self.cells[0]
-        if len(self.cells) == 1:
-            return f"[{c0},{r0}]"
-        return f"[{c0},{r0}]+{len(self.cells) - 1}"
-
-
-@dataclass
-class GoldHit:
-    blob:         ItemBlob
-    shelf_item:   ParsedItem
-    worn_item:    Optional[ParsedItem]
-    is_dual_gf:   bool
-    timestamp:    str = field(
-        default_factory=lambda: datetime.datetime.now().isoformat())
-    capture_path: Optional[str] = None
-
-    # back-compat shims used by OverlayWindow
-    @property
-    def col(self) -> int:
-        return self.blob.col
-
-    @property
-    def row(self) -> int:
-        return self.blob.row
-
-    @property
-    def gold_value(self) -> int:
-        return self.shelf_item.flat_gf
-
-
-@dataclass
-class WalkStats:
-    lap_number:    int   = 0
-    items_visited: int   = 0     # unique blobs visited (was cells_visited)
-    blobs_found:   int   = 0     # blobs detected in last grid snapshot
-    hits:          int   = 0
-    dual_hits:     int   = 0
-    best_flat:     int   = 0
-    best_pct:      int   = 0
-    start_time:    float = field(default_factory=time.time)
-
-    def elapsed_str(self) -> str:
-        e = int(time.time() - self.start_time)
-        return f"{e // 60:02d}:{e % 60:02d}"
-
-
-# ---------------------------------------------------------------------------
-#  SCROLL READER  (OCR)
-# ---------------------------------------------------------------------------
-
-class ScrollReader:
-    def __init__(self) -> None:
-        self._rapid = None
+def _ask_vision(pil_img, prompt, log):
+    """Send a PIL image + text prompt to whichever backend is active."""
+    backend = _load_ai_backend(log)
+    if backend == "moondream":
         try:
-            self._rapid = RapidOCR()
-            log.info("ScrollReader (RapidOCR) initialised OK.")
+            enc = _MD_MODEL.encode_image(pil_img)
+            answer = _MD_MODEL.query(enc, prompt)["answer"].strip()
+            log.debug("moondream answer: %r", answer)
+            return answer
         except Exception as exc:
-            log.warning(f"RapidOCR init failed: {exc}. Falling back to WinRT.")
-
-    def read(self, img: "Image.Image") -> str:
-        if self._rapid:
-            return self._read_rapid(img)
-        return self._read_winrt(img)
-
-    def _read_rapid(self, img: "Image.Image") -> str:
-        arr = np.array(img.convert("RGB"))
-        try:
-            result, _ = self._rapid(arr)
-            if not result:
-                return ""
-            return "\n".join(r[1] for r in result if r and len(r) >= 2)
-        except Exception as exc:
-            log.debug(f"ScrollReader read error: {exc}")
+            log.warning("moondream query failed: %s", exc)
             return ""
-
-    def _read_winrt(self, img: "Image.Image") -> str:
+    if backend == "ocr":
         try:
-            import asyncio
-            import winocr
-            loop = asyncio.new_event_loop()
-            res  = loop.run_until_complete(winocr.recognize_pil(img, "en"))
-            loop.close()
-            return res.text if res else ""
+            from rapidocr_onnxruntime import RapidOCR
+            ocr = RapidOCR()
+            arr = np.array(pil_img)
+            result, _ = ocr(arr)
+            text = " ".join(r[1] for r in result) if result else ""
+            log.debug("OCR fallback text: %r", text)
+            return text
         except Exception as exc:
-            log.debug(f"WinRT fallback error: {exc}")
+            log.warning("OCR fallback failed: %s", exc)
             return ""
-
-
-# ---------------------------------------------------------------------------
-#  SCREEN CAPTURE
-# ---------------------------------------------------------------------------
-
-class ScreenCapture:
-    """All screen-grabbing lives here."""
-
-    def grab_region(self, x: int, y: int, w: int, h: int) -> "Image.Image":
-        try:
-            return ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True)
-        except Exception:
-            return pyautogui.screenshot(region=(x, y, w, h))
-
-    def grab_grid(self) -> "Image.Image":
-        """Capture the full configured shelf grid area."""
-        gw = Config.CELL_W * Config.SHELF_COLS
-        gh = Config.CELL_H * Config.SHELF_ROWS
-        return self.grab_region(
-            Config.SHELF_ORIGIN_X, Config.SHELF_ORIGIN_Y, gw, gh
-        )
-
-    def grab_tooltip(self, cursor_x: int, cursor_y: int) -> "Image.Image":
-        """
-        Capture a tooltip-sized region anchored relative to the cursor.
-
-        The anchor point is configured via TOOLTIP_ANCHOR_X / TOOLTIP_ANCHOR_Y:
-        those values express where the cursor sits *within* the capture box.
-        This puts the majority of the box above-left of the cursor, matching
-        where TH4 draws its tooltips.
-
-        The box is clamped to the virtual screen rectangle so it never goes
-        off-screen (handles cursors near edges).
-        """
-        sw = pyautogui.size().width
-        sh = pyautogui.size().height
-        tw = Config.TOOLTIP_W
-        th = Config.TOOLTIP_H
-        ax = Config.TOOLTIP_ANCHOR_X
-        ay = Config.TOOLTIP_ANCHOR_Y
-
-        # Ideal top-left of capture box
-        ideal_x = cursor_x - ax
-        ideal_y = cursor_y - ay
-
-        # Clamp to screen bounds
-        x0 = max(0, min(ideal_x, sw - tw))
-        y0 = max(0, min(ideal_y, sh - th))
-
-        log.debug(
-            f"grab_tooltip: cursor=({cursor_x},{cursor_y})"
-            f" box=({x0},{y0},{tw},{th})"
-        )
-        return self.grab_region(x0, y0, tw, th)
-
-
-# ---------------------------------------------------------------------------
-#  GRID BLOB DETECTOR
-#
-#  Takes a screenshot of the full shelf grid and returns a list of
-#  ItemBlob objects -- one per unique item, regardless of how many cells
-#  it occupies.
-#
-#  Algorithm
-#  ---------
-#  1. For each cell (col, row), sample a small patch around the cell centre.
-#  2. Compute a compact hash of the patch (mean RGB quantised to 4 levels).
-#  3. Empty cells (low overall luma) are skipped.
-#  4. Group adjacent cells that share the same hash via flood-fill.
-#  5. Return each group as one ItemBlob whose cursor target is the
-#     centroid of all constituent cells.
-# ---------------------------------------------------------------------------
-
-class GridBlobDetector:
-    """
-    Detects unique item blobs in a grid screenshot.
-
-    Returns a list of ItemBlob, ordered top-left to bottom-right
-    (row-major), with duplicates removed.
-    """
-
-    # Hash quantisation: each RGB channel is binned into this many levels.
-    # 6 levels gives a 3-byte hash (6^3 = 216 values) -- coarse enough to
-    # treat one item as the same across its cells, fine enough to tell
-    # most different items apart.
-    _QUANT = 6
-
-    def detect(self, grid_img: "Image.Image") -> List[ItemBlob]:
-        """
-        grid_img -- PIL image of exactly the configured grid area
-                    (width = CELL_W * SHELF_COLS, height = CELL_H * SHELF_ROWS)
-        Returns list of ItemBlob sorted by (row, col).
-        """
-        arr = np.array(grid_img.convert("RGB"), dtype=np.uint16)
-        cw  = Config.CELL_W
-        ch  = Config.CELL_H
-        cols = Config.SHELF_COLS
-        rows = Config.SHELF_ROWS
-        r    = max(1, Config.BLOB_SAMPLE_RADIUS)
-
-        # Build hash map: (col, row) -> hash_int | None
-        cell_hash: dict = {}
-        for row in range(rows):
-            for col in range(cols):
-                # Centre of this cell in grid-image coordinates
-                px = col * cw + cw // 2
-                py = row * ch + ch // 2
-
-                # Sample patch (clamped to image)
-                x0 = max(0, px - r)
-                y0 = max(0, py - r)
-                x1 = min(arr.shape[1], px + r + 1)
-                y1 = min(arr.shape[0], py + r + 1)
-                patch = arr[y0:y1, x0:x1]   # shape (H, W, 3)
-
-                # Mean luma -- skip empty / very dark cells
-                mean_rgb = patch.mean(axis=(0, 1))   # (R, G, B)
-                luma = 0.299 * mean_rgb[0] + 0.587 * mean_rgb[1] + 0.114 * mean_rgb[2]
-                if luma < Config.EMPTY_LUMA_THRESH:
-                    log.debug(f"  Blob detect [{col},{row}]: luma={luma:.1f} -- EMPTY")
-                    cell_hash[(col, row)] = None
-                    continue
-
-                # Quantise each channel to _QUANT levels, pack into int
-                q   = self._QUANT
-                rq  = int(mean_rgb[0] * (q - 1) / 255)
-                gq  = int(mean_rgb[1] * (q - 1) / 255)
-                bq  = int(mean_rgb[2] * (q - 1) / 255)
-                h   = rq * q * q + gq * q + bq
-                cell_hash[(col, row)] = h
-                log.debug(
-                    f"  Blob detect [{col},{row}]: luma={luma:.1f}"
-                    f" rgb=({mean_rgb[0]:.0f},{mean_rgb[1]:.0f},{mean_rgb[2]:.0f})"
-                    f" hash={h}"
-                )
-
-        # Flood-fill: group adjacent cells with identical non-None hashes
-        visited: Set[Tuple[int, int]] = set()
-        blobs: List[ItemBlob] = []
-
-        for row in range(rows):
-            for col in range(cols):
-                if (col, row) in visited:
-                    continue
-                h = cell_hash.get((col, row))
-                if h is None:
-                    visited.add((col, row))
-                    continue
-
-                # BFS flood-fill
-                group: List[Tuple[int, int]] = []
-                queue_bfs = [(col, row)]
-                while queue_bfs:
-                    cc, rr = queue_bfs.pop()
-                    if (cc, rr) in visited:
-                        continue
-                    if cell_hash.get((cc, rr)) != h:
-                        continue
-                    visited.add((cc, rr))
-                    group.append((cc, rr))
-                    for nc, nr in ((cc+1,rr),(cc-1,rr),(cc,rr+1),(cc,rr-1)):
-                        if 0 <= nc < cols and 0 <= nr < rows:
-                            queue_bfs.append((nc, nr))
-
-                if not group:
-                    continue
-
-                # Centroid in screen coordinates
-                ox = Config.SHELF_ORIGIN_X
-                oy = Config.SHELF_ORIGIN_Y
-                mean_col = sum(c for c, _ in group) / len(group)
-                mean_row = sum(r for _, r in group) / len(group)
-                scx = int(ox + mean_col * cw + cw // 2)
-                scy = int(oy + mean_row * ch + ch // 2)
-
-                blobs.append(ItemBlob(
-                    cells=sorted(group),
-                    cx=scx, cy=scy,
-                    phash=h,
-                ))
-                log.debug(
-                    f"  Blob: hash={h} cells={group} centroid=({scx},{scy})"
-                )
-
-        # Sort top-left to bottom-right (row-major by first cell)
-        blobs.sort(key=lambda b: (b.cells[0][1], b.cells[0][0]))
-        log.info(
-            f"GridBlobDetector: {len(blobs)} unique blobs detected"
-            f" ({rows * cols} cells total)"
-        )
-        return blobs
-
-
-# ---------------------------------------------------------------------------
-#  ITEM PARSER
-# ---------------------------------------------------------------------------
-
-_FLAT_RE = [re.compile(p, re.IGNORECASE) for p in Config.FLAT_GF_PATTERNS]
-_PCT_RE  = [re.compile(p, re.IGNORECASE) for p in Config.PCT_GF_PATTERNS]
-
-
-def _best_match(patterns: list, text: str) -> int:
-    best = 0
-    for pat in patterns:
-        for m in pat.finditer(text):
-            try:
-                val     = int(m.group(1))
-                tail    = text[m.end(1):m.end(1) + 10]
-                range_m = re.search(r"-\s*(\d+)", tail)
-                if range_m:
-                    val = int(range_m.group(1))
-                if val > best:
-                    best = val
-            except (IndexError, ValueError):
-                pass
-    return best
-
-
-def _extract_name(text: str) -> str:
-    for line in text.splitlines():
-        line = line.strip()
-        if line and not re.match(r"^[\d\+\-%\s]+$", line):
-            return line[:60]
     return ""
 
 
-def parse_item_text(text: str) -> ParsedItem:
-    flat = _best_match(_FLAT_RE, text)
-    pct  = _best_match(_PCT_RE, text)
-    name = _extract_name(text)
-    return ParsedItem(name=name, flat_gf=flat, pct_gf=pct, raw_text=text)
+# ---------------------------------------------------------------------------
+#  Config
+# ---------------------------------------------------------------------------
+@dataclass
+class Config:
+    # blob detection
+    BLOB_HUE_LO:  int = 0
+    BLOB_HUE_HI:  int = 25
+    BLOB_SAT_LO:  int = 60
+    BLOB_VAL_LO:  int = 60
+    MIN_BLOB_AREA: int = 500
+    MAX_BLOB_AREA: int = 12000
+
+    # timing (ms)
+    HOVER_DELAY_MS:  int = 200
+    ALT_DELAY_MS:    int = 280
+    MOVE_DELAY_MS:   int = 60
+
+    # tooltip crop
+    TOOLTIP_OFFSET_X: int = 20
+    TOOLTIP_OFFSET_Y: int = -10
+    TOOLTIP_W:  int = 460
+    TOOLTIP_H:  int = 360
+
+    # scan region (0,0,0,0 = full screen)
+    SCAN_LEFT:   int = 0
+    SCAN_TOP:    int = 0
+    SCAN_RIGHT:  int = 0
+    SCAN_BOTTOM: int = 0
+
+    MIN_GF: int = 1
+    RESTOCK_KEY: str = "r"
+    PASS_LIST: List[str] = field(default_factory=list)
+    LOG_DIR: str = "logs"
+    PREFS_FILE: str = "_tools/prefs.json"
 
 
 # ---------------------------------------------------------------------------
-#  COMPARISON TOOLTIP SPLITTER
+#  Logging
 # ---------------------------------------------------------------------------
-
-def split_comparison_tooltip(full_text: str) -> Tuple[str, str]:
-    """Split ALT comparison tooltip into (shelf_text, worn_text)."""
-    text_lower = full_text.lower()
-    sel_pos = eq_pos = -1
-    for m in Config.SHELF_MARKERS:
-        idx = text_lower.find(m)
-        if idx != -1:
-            sel_pos = idx
-            break
-    for m in Config.WORN_MARKERS:
-        idx = text_lower.find(m)
-        if idx != -1:
-            eq_pos = idx
-            break
-    if sel_pos != -1 and eq_pos != -1:
-        if sel_pos < eq_pos:
-            return full_text[sel_pos:eq_pos], full_text[eq_pos:]
-        return full_text[sel_pos:], full_text[eq_pos:sel_pos]
-    if eq_pos != -1:
-        return full_text[:eq_pos], full_text[eq_pos:]
-    lines = full_text.splitlines()
-    mid   = max(1, len(lines) // 2)
-    log.debug("split_comparison: line-count fallback")
-    return "\n".join(lines[:mid]), "\n".join(lines[mid:])
-
-
-def is_passed(item: ParsedItem) -> bool:
-    name_lower = item.name.lower()
-    for entry in Config.PASS_LIST:
-        if entry.lower() in name_lower:
-            log.debug(f"  Pass-list hit: '{item.name}' matches '{entry}'")
-            return True
-    return False
+def _setup_logging(cfg):
+    log_dir = Path(cfg.LOG_DIR)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"session_{stamp}.log"
+    fmt = logging.Formatter(
+        "%(asctime)s.%(msecs)03d [%(levelname)-7s] %(message)s",
+        datefmt="%H:%M:%S")
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setFormatter(fmt); fh.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt); ch.setLevel(logging.DEBUG)
+    log = logging.getLogger("GoldSense")
+    log.setLevel(logging.DEBUG)
+    log.addHandler(fh); log.addHandler(ch)
+    log.info("Session log: %s", log_file)
+    return log
 
 
 # ---------------------------------------------------------------------------
-#  INVENTORY INSPECTOR  (core walk loop)
+#  Prefs
 # ---------------------------------------------------------------------------
+def load_prefs(cfg, log):
+    pf = Path(cfg.PREFS_FILE)
+    if not pf.exists(): return
+    try:
+        data = json.loads(pf.read_text(encoding="utf-8"))
+        for k in ["hover_delay_ms","alt_delay_ms","scan_left","scan_top",
+                  "scan_right","scan_bottom","pass_list","blob_hue_lo",
+                  "blob_hue_hi","blob_sat_lo","blob_val_lo"]:
+            attr = k.upper()
+            if k in data and hasattr(cfg, attr):
+                setattr(cfg, attr, data[k])
+        log.info("Prefs loaded from %s", pf)
+    except Exception as exc:
+        log.warning("Could not load prefs: %s", exc)
 
-class InventoryInspector:
-    def __init__(
-        self,
-        reader:   ScrollReader,
-        capture:  ScreenCapture,
-        detector: GridBlobDetector,
-    ) -> None:
-        self._reader   = reader
-        self._capture  = capture
-        self._detector = detector
-        self._active   = False
-        self._held     = False
-        self._next_ev  = threading.Event()
-        self._halt_ev  = threading.Event()
 
-        self.on_hit:     Optional[callable] = None
-        self.on_blob:    Optional[callable] = None   # (blob, text) -- replaces on_cell
-        self.on_restock: Optional[callable] = None
-        self.on_status:  Optional[callable] = None
-        self.on_halted:  Optional[callable] = None
+def save_prefs(cfg, log):
+    pf = Path(cfg.PREFS_FILE)
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "hover_delay_ms":  cfg.HOVER_DELAY_MS,
+        "alt_delay_ms":    cfg.ALT_DELAY_MS,
+        "scan_left":       cfg.SCAN_LEFT,
+        "scan_top":        cfg.SCAN_TOP,
+        "scan_right":      cfg.SCAN_RIGHT,
+        "scan_bottom":     cfg.SCAN_BOTTOM,
+        "pass_list":       cfg.PASS_LIST,
+        "blob_hue_lo":     cfg.BLOB_HUE_LO,
+        "blob_hue_hi":     cfg.BLOB_HUE_HI,
+        "blob_sat_lo":     cfg.BLOB_SAT_LO,
+        "blob_val_lo":     cfg.BLOB_VAL_LO,
+    }
+    pf.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    log.info("Prefs saved to %s", pf)
 
-        self.stats = WalkStats()
 
-    # --- public API --------------------------------------------------------
+# ---------------------------------------------------------------------------
+#  Screenshot helpers
+# ---------------------------------------------------------------------------
+def screenshot_region(left, top, right, bottom):
+    return ImageGrab.grab(bbox=(left, top, right, bottom))
 
-    def begin(self) -> None:
-        if self._active:
-            return
-        self._active  = True
-        self._halt_ev.clear()
-        self._next_ev.clear()
-        self.stats    = WalkStats()
-        threading.Thread(target=self._walk_loop, daemon=True).start()
-        log.info("InventoryInspector: scan started.")
 
-    def halt(self) -> None:
-        self._active = False
-        self._halt_ev.set()
-        self._next_ev.set()
-        log.info("InventoryInspector: halt requested.")
+def screenshot_full(cfg):
+    if cfg.SCAN_RIGHT > cfg.SCAN_LEFT and cfg.SCAN_BOTTOM > cfg.SCAN_TOP:
+        return screenshot_region(cfg.SCAN_LEFT, cfg.SCAN_TOP,
+                                  cfg.SCAN_RIGHT, cfg.SCAN_BOTTOM)
+    return ImageGrab.grab()
 
-    def hold_toggle(self) -> None:
-        self._held = not self._held
-        if self._held:
-            log.info("Held.")
-            self._status("Held -- press F8 to resume.")
-        else:
-            log.info("Resumed.")
-            self._next_ev.set()
 
-    def user_next(self) -> None:
-        log.info("User: Next.")
-        self._next_ev.set()
+def screenshot_tooltip(cx, cy, cfg):
+    l = cx + cfg.TOOLTIP_OFFSET_X
+    t = cy + cfg.TOOLTIP_OFFSET_Y
+    r = l + cfg.TOOLTIP_W
+    b = t + cfg.TOOLTIP_H
+    sw, sh = pyautogui.size()
+    if r > sw: l = sw - cfg.TOOLTIP_W; r = sw
+    if b > sh: t = sh - cfg.TOOLTIP_H; b = sh
+    if l < 0:  l = 0; r = cfg.TOOLTIP_W
+    if t < 0:  t = 0; b = cfg.TOOLTIP_H
+    return screenshot_region(l, t, r, b)
 
-    # --- internals ---------------------------------------------------------
 
-    def _status(self, msg: str) -> None:
-        log.debug(f"STATUS: {msg}")
-        if self.on_status:
-            self.on_status(msg)
+# ---------------------------------------------------------------------------
+#  Blob detection
+# ---------------------------------------------------------------------------
+@dataclass
+class ItemBlob:
+    cx: int
+    cy: int
+    x: int
+    y: int
+    w: int
+    h: int
+    area: int
 
-    def _wait_if_held(self) -> None:
-        while self._held and self._active:
+
+def find_item_blobs(cfg, log):
+    """
+    Screenshot the scan region, find reddish-brown item squares via
+    HSV colour masking + contour analysis.
+    Returns list of ItemBlob sorted left-to-right, top-to-bottom.
+    """
+    shot = screenshot_full(cfg)
+    arr  = cv2.cvtColor(np.array(shot.convert("RGB")), cv2.COLOR_RGB2HSV)
+
+    lo = np.array([cfg.BLOB_HUE_LO, cfg.BLOB_SAT_LO, cfg.BLOB_VAL_LO])
+    hi = np.array([cfg.BLOB_HUE_HI, 255, 255])
+    mask = cv2.inRange(arr, lo, hi)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    off_x = cfg.SCAN_LEFT if cfg.SCAN_RIGHT > cfg.SCAN_LEFT else 0
+    off_y = cfg.SCAN_TOP  if cfg.SCAN_BOTTOM > cfg.SCAN_TOP  else 0
+
+    blobs = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < cfg.MIN_BLOB_AREA or area > cfg.MAX_BLOB_AREA:
+            continue
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        cx = off_x + bx + bw // 2
+        cy = off_y + by + bh // 2
+        blobs.append(ItemBlob(
+            cx=cx, cy=cy,
+            x=off_x + bx, y=off_y + by,
+            w=bw, h=bh, area=int(area)))
+
+    blobs.sort(key=lambda b: (b.y // 20, b.x))
+    log.info("Blob detection: %d item(s) found.", len(blobs))
+    return blobs
+
+
+# ---------------------------------------------------------------------------
+#  AI analysis helpers
+# ---------------------------------------------------------------------------
+_FLAT_GF_RE   = re.compile(r'\b(\d+)\b')
+_COMPARE_RE   = re.compile(r'LEFT\s*=\s*(\d+).*?RIGHT\s*=\s*(\d+)', re.I | re.S)
+
+
+def _parse_int(text, default=0):
+    m = _FLAT_GF_RE.search(text)
+    return int(m.group(1)) if m else default
+
+
+def ask_flat_gf(img, log):
+    prompt = (
+        "Look at this game item tooltip screenshot. "
+        "Does it show a flat (not percentage) bonus to gold found? "
+        "Reply with only the integer number, e.g. '14', or '0' if none."
+    )
+    raw = _ask_vision(img, prompt, log)
+    val = _parse_int(raw, 0)
+    log.debug("ask_flat_gf -> raw=%r parsed=%d", raw, val)
+    return val
+
+
+def ask_item_name(img, log):
+    prompt = (
+        "Look at this game item tooltip screenshot. "
+        "What is the item's name (the coloured line at the very top)? "
+        "Reply with only the item name, nothing else."
+    )
+    raw = _ask_vision(img, prompt, log)
+    log.debug("ask_item_name -> %r", raw)
+    return raw.strip()
+
+
+def ask_compare_gf(img, log):
+    """
+    Ask the AI about the ALT comparison tooltip (two items side-by-side).
+    Returns (shelf_gf, equipped_gf).
+    """
+    prompt = (
+        "This screenshot shows two game item tooltips side by side for comparison. "
+        "For each tooltip, find the flat (not percent) bonus to gold found. "
+        "Reply in exactly this format: LEFT=<number> RIGHT=<number>  "
+        "Use 0 if not present. Example: LEFT=14 RIGHT=0"
+    )
+    raw = _ask_vision(img, prompt, log)
+    log.debug("ask_compare_gf -> raw=%r", raw)
+    m = _COMPARE_RE.search(raw)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    nums = _FLAT_GF_RE.findall(raw)
+    if len(nums) >= 2:
+        return int(nums[0]), int(nums[1])
+    if len(nums) == 1:
+        return int(nums[0]), 0
+    return 0, 0
+
+
+# ---------------------------------------------------------------------------
+#  Hit record
+# ---------------------------------------------------------------------------
+@dataclass
+class HitRecord:
+    lap: int
+    blob_idx: int
+    item_name: str
+    shelf_gf: int
+    equipped_gf: int
+    timestamp: str = field(default_factory=lambda: datetime.datetime.now().strftime("%H:%M:%S"))
+    tooltip_path: str = ""
+    compare_path: str = ""
+    decision: str = ""   # "buy" | "pass" | "pending"
+
+
+# ---------------------------------------------------------------------------
+#  Inspector engine
+# ---------------------------------------------------------------------------
+class Inspector:
+    def __init__(self, cfg, log, ui_queue):
+        self.cfg = cfg
+        self.log = log
+        self.ui_q = ui_queue
+        self._state = "halted"
+        self._lock  = threading.Lock()
+        self._thread = None
+        self.lap = 0
+        self.blobs_found = 0
+        self.visited = 0
+        self.hits = []
+        self._current_hit = None
+        self._log_dir = Path(cfg.LOG_DIR)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+
+    def _set(self, state):
+        with self._lock:
+            self._state = state
+        self._push("state", state)
+
+    def _get(self):
+        with self._lock:
+            return self._state
+
+    def _push(self, kind, payload=None):
+        self.ui_q.put_nowait({"kind": kind, "payload": payload})
+
+    def begin(self):
+        if self._get() not in ("halted",): return
+        self._set("running")
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def halt(self):
+        self._set("halted")
+        self.log.info("Halt requested.")
+
+    def hold(self):
+        s = self._get()
+        if s == "running":   self._set("holding")
+        elif s in ("holding", "paused_hit"): self._set("running")
+
+    def next_item(self):
+        if self._get() == "paused_hit" and self._current_hit:
+            self._current_hit.decision = "pass"
+            self._push("hit_resolved", self._current_hit)
+            self._set("running")
+
+    def _run(self):
+        self.log.info("Scan started.")
+        self._push("log", "Scan started.")
+        cfg = self.cfg
+        try:
+            while self._get() not in ("halted",):
+                self._wait_not_holding()
+                if self._get() == "halted": break
+
+                self.lap += 1
+                self._push("lap", self.lap)
+                self._push("log", f"=== Shelf restocked (lap #{self.lap}) ===")
+                self.log.info("=== Lap %d -- detecting blobs ===", self.lap)
+
+                blobs = find_item_blobs(cfg, self.log)
+                self.blobs_found = len(blobs)
+                self._push("blobs", self.blobs_found)
+
+                if not blobs:
+                    self.log.warning("No blobs detected -- check scan region / blob tuning.")
+                    self._push("log", "No items detected. Check calibration.")
+                    time.sleep(1.0)
+                    self._restock()
+                    continue
+
+                for idx, blob in enumerate(blobs):
+                    if self._get() == "halted": break
+                    self._wait_not_holding()
+                    if self._get() == "halted": break
+
+                    self.visited += 1
+                    self._push("visited", self.visited)
+                    self._push("item_pos", f"[{idx+1}/{len(blobs)}]")
+                    self.log.debug("Blob %d/%d centre=(%d,%d) area=%d",
+                                   idx+1, len(blobs), blob.cx, blob.cy, blob.area)
+
+                    pyautogui.moveTo(blob.cx, blob.cy, duration=0.04)
+                    time.sleep(cfg.HOVER_DELAY_MS / 1000)
+
+                    tip_img  = screenshot_tooltip(blob.cx, blob.cy, cfg)
+                    tip_path = self._save_img(tip_img, f"tip_L{self.lap}_B{idx}")
+
+                    item_name = ask_item_name(tip_img, self.log)
+                    shelf_gf  = ask_flat_gf(tip_img, self.log)
+
+                    self.log.info("Blob %d: name=%r flat_gf=%d", idx+1, item_name, shelf_gf)
+                    self._push("log", f"  [{idx+1}] {item_name!r} -> flat GF={shelf_gf}")
+
+                    if shelf_gf < cfg.MIN_GF:
+                        continue
+
+                    keyboard.press("alt")
+                    time.sleep(cfg.ALT_DELAY_MS / 1000)
+                    cmp_img  = screenshot_tooltip(blob.cx, blob.cy, cfg)
+                    keyboard.release("alt")
+                    cmp_path = self._save_img(cmp_img, f"cmp_L{self.lap}_B{idx}")
+
+                    shelf_gf2, equipped_gf = ask_compare_gf(cmp_img, self.log)
+                    if shelf_gf2 > 0:
+                        shelf_gf = shelf_gf2
+
+                    self.log.info("Compare: shelf=%d equipped=%d", shelf_gf, equipped_gf)
+                    self._push("log",
+                        f"  [{idx+1}] Compare: shelf={shelf_gf} equipped={equipped_gf}")
+
+                    on_pass_list = any(
+                        p.lower() in item_name.lower()
+                        for p in cfg.PASS_LIST if p)
+
+                    should_pause = (
+                        on_pass_list
+                        or equipped_gf == 0
+                        or shelf_gf >= equipped_gf
+                    )
+
+                    if should_pause:
+                        hr = HitRecord(
+                            lap=self.lap, blob_idx=idx,
+                            item_name=item_name,
+                            shelf_gf=shelf_gf,
+                            equipped_gf=equipped_gf,
+                            tooltip_path=tip_path,
+                            compare_path=cmp_path,
+                            decision="pending",
+                        )
+                        self.hits.append(hr)
+                        self._current_hit = hr
+                        self._push("hits_count", len(self.hits))
+                        self._push("hit", hr)
+                        self._set("paused_hit")
+                        self.log.info("HIT paused: %s (shelf=%d worn=%d)",
+                                      item_name, shelf_gf, equipped_gf)
+
+                        while self._get() == "paused_hit":
+                            time.sleep(0.1)
+
+                        self._current_hit = None
+
+                if self._get() != "halted":
+                    self._push("log", "Shelf exhausted -- restocking.")
+                    self._restock()
+
+        except Exception as exc:
+            self.log.critical("Inspector crash: %s", exc, exc_info=True)
+            self._push("log", f"CRASH: {exc}")
+            self._push("crash", traceback.format_exc())
+        finally:
+            self._set("halted")
+            self._push("log", "Inspector stopped.")
+            self.log.info("Inspector stopped.")
+
+    def _restock(self):
+        pyautogui.press(self.cfg.RESTOCK_KEY)
+        time.sleep(0.6)
+
+    def _wait_not_holding(self):
+        while self._get() == "holding":
             time.sleep(0.1)
 
-    def _walk_loop(self) -> None:
-        try:
-            while self._active:
-                self.stats.lap_number += 1
-                log.info(f"=== Scan lap #{self.stats.lap_number} ===")
-                if self.on_restock:
-                    self.on_restock(self.stats.lap_number)
-                self._inspect_blobs()
-                if not self._active:
-                    break
-                self._do_restock()
-        except Exception as exc:
-            log.error(f"Inspector crashed: {exc}", exc_info=True)
-        finally:
-            self._active = False
-            if self.on_halted:
-                self.on_halted()
-
-    def _inspect_blobs(self) -> None:
-        """Capture grid -> detect blobs -> visit each unique blob once."""
-        self._status("Scanning grid for items...")
-
-        # Move cursor away from the grid before the snapshot so it
-        # doesn't occlude cells or trigger a tooltip mid-capture.
-        pyautogui.moveTo(
-            Config.SHELF_ORIGIN_X - 60,
-            Config.SHELF_ORIGIN_Y + (Config.CELL_H * Config.SHELF_ROWS) // 2,
-            duration=0.0,
-        )
-        time.sleep(0.05)   # let any lingering tooltip dismiss
-
-        grid_img = self._capture.grab_grid()
-        ts_snap  = datetime.datetime.now().strftime("%H%M%S_%f")[:9]
-        try:
-            grid_img.save(str(Config.LOG_DIR / f"grid_{ts_snap}.png"))
-        except Exception:
-            pass
-
-        blobs = self._detector.detect(grid_img)
-        self.stats.blobs_found = len(blobs)
-        self._status(f"Detected {len(blobs)} unique items -- scanning...")
-
-        for blob in blobs:
-            if not self._active or self._halt_ev.is_set():
-                return
-            self._wait_if_held()
-            self._inspect_one_blob(blob)
-
-    def _inspect_one_blob(self, blob: ItemBlob) -> None:
-        """Visit a single blob: hover, read tooltip, apply hit logic."""
-        log.debug(
-            f"Blob {blob.label()} cursor=({blob.cx},{blob.cy})"
-            f" cells={blob.cells}"
-        )
-        pyautogui.moveTo(blob.cx, blob.cy, duration=0.0)
-        time.sleep(Config.HOVER_DELAY_MS / 1000.0)
-
-        img_plain  = self._capture.grab_tooltip(blob.cx, blob.cy)
-        text_plain = self._reader.read(img_plain)
-        log.debug(
-            f"  Plain read: {text_plain[:120].replace(chr(10), ' | ')}"
-        )
-
-        if self.on_blob:
-            self.on_blob(blob, text_plain)
-        self.stats.items_visited += 1
-
-        if not re.search(r"gold", text_plain, re.IGNORECASE):
-            return
-
-        quick = parse_item_text(text_plain)
-        if quick.flat_gf < Config.MIN_GOLD_FIND and quick.pct_gf == 0:
-            return
-
-        log.info(
-            f"  Pre-filter hit {blob.label()}:"
-            f" flat={quick.flat_gf} pct={quick.pct_gf}"
-        )
-        self._status(f"Item {blob.label()} -- reading comparison...")
-
-        keyboard.press("alt")
-        time.sleep(Config.ALT_DELAY_MS / 1000.0)
-        img_alt  = self._capture.grab_tooltip(blob.cx, blob.cy)
-        keyboard.release("alt")
-        text_alt = self._reader.read(img_alt)
-        log.debug(
-            f"  Compare read: {text_alt[:200].replace(chr(10), ' | ')}"
-        )
-
-        shelf_raw, worn_raw = split_comparison_tooltip(text_alt)
-        shelf_item = parse_item_text(shelf_raw)
-        worn_item  = parse_item_text(worn_raw)
-
-        if shelf_item.flat_gf == 0 and shelf_item.pct_gf == 0:
-            shelf_item = quick
-            log.debug("  Compare read empty -- using plain text.")
-
-        log.info(
-            f"  Shelf: flat={shelf_item.flat_gf}"
-            f"  pct={shelf_item.pct_gf}"
-            f"  name='{shelf_item.name}'"
-        )
-        log.info(
-            f"  Worn:  flat={worn_item.flat_gf}"
-            f"  pct={worn_item.pct_gf}"
-            f"  name='{worn_item.name}'"
-        )
-
-        is_dual = (
-            shelf_item.flat_gf >= Config.MIN_GOLD_FIND
-            and shelf_item.pct_gf > 0
-        )
-        should_pause, reason = self._should_pause(
-            shelf_item, worn_item, is_dual
-        )
-
-        if not should_pause:
-            log.info(f"  Passed: {reason}")
-            self._status(f"Item {blob.label()} passed: {reason}")
-            return
-
-        log.info(f"  *** HIT {blob.label()}: {reason}")
-        self.stats.hits += 1
-        if is_dual:
-            self.stats.dual_hits += 1
-        if shelf_item.flat_gf > self.stats.best_flat:
-            self.stats.best_flat = shelf_item.flat_gf
-        if shelf_item.pct_gf > self.stats.best_pct:
-            self.stats.best_pct = shelf_item.pct_gf
-
-        ts   = datetime.datetime.now().strftime("%H%M%S_%f")[:9]
-        path = str(
-            Config.LOG_DIR
-            / f"hit_{ts}_c{blob.col}_r{blob.row}.png"
-        )
-        try:
-            img_alt.save(path)
-        except Exception:
-            path = None
-
-        hit = GoldHit(
-            blob=blob,
-            shelf_item=shelf_item,
-            worn_item=worn_item,
-            is_dual_gf=is_dual,
-            capture_path=path,
-        )
-        if self.on_hit:
-            self.on_hit(hit)
-
-        self._next_ev.clear()
-        self._status(f"WAITING -- {reason}")
-        self._next_ev.wait()
-        self._next_ev.clear()
-
-    def _should_pause(
-        self,
-        shelf:   ParsedItem,
-        worn:    ParsedItem,
-        is_dual: bool,
-    ) -> Tuple[bool, str]:
-        if shelf.flat_gf < Config.MIN_GOLD_FIND and not is_dual:
-            return (
-                False,
-                f"flat GF {shelf.flat_gf} below minimum {Config.MIN_GOLD_FIND}",
-            )
-
-        if is_dual:
-            return (
-                True,
-                (
-                    f"DUAL GF! +{shelf.flat_gf} flat AND"
-                    f" +{shelf.pct_gf}% ('{shelf.name}') -- confirm before passing"
-                ),
-            )
-
-        worn_passed = is_passed(worn)
-        worn_has_gf = worn.flat_gf >= Config.MIN_GOLD_FIND
-
-        if worn_passed or not worn_has_gf:
-            return (
-                True,
-                (
-                    f"worn slot on pass list / unset -- shelf +{shelf.flat_gf}"
-                    f" meets minimum ('{shelf.name}')"
-                ),
-            )
-
-        if shelf.flat_gf >= worn.flat_gf:
-            return (
-                True,
-                (
-                    f"shelf +{shelf.flat_gf} >= worn +{worn.flat_gf}"
-                    f" ('{shelf.name}' vs '{worn.name}')"
-                ),
-            )
-
-        return (
-            False,
-            f"shelf +{shelf.flat_gf} < worn +{worn.flat_gf} -- pass",
-        )
-
-    def _do_restock(self) -> None:
-        log.info("Restocking shelf...")
-        self._status("Restocking shelf...")
-        keyboard.press_and_release(Config.RESTOCK_KEY)
-        time.sleep(Config.RESTOCK_DELAY_MS / 1000.0)
+    def _save_img(self, img, name):
+        p = self._log_dir / f"{name}.png"
+        img.save(p)
+        return str(p)
 
 
 # ---------------------------------------------------------------------------
-#  DRAG-SELECT CALIBRATION OVERLAY
+#  Region select overlay
 # ---------------------------------------------------------------------------
-
-class DragSelectOverlay:
-    """
-    Full-screen transparent drag-select canvas.
-    Calls callback(x, y, w, h) on successful drag, then destroys itself.
-    """
-
-    FILL_COLOR   = "#00aaff"
-    BORDER_COLOR = "#00aaff"
-    BORDER_WIDTH = 2
-    LABEL_COLOR  = "#ffffff"
-
-    def __init__(
-        self,
-        parent: tk.Tk,
-        cols:   int,
-        rows:   int,
-        on_done,
-    ) -> None:
-        self._parent  = parent
-        self._cols    = cols
-        self._rows    = rows
+class RegionSelectOverlay:
+    def __init__(self, parent_tk, on_done):
         self._on_done = on_done
-        self._start_x = self._start_y = 0
-        self._rect_id = self._label_id = None
+        self._start = None
+        self._rect  = None
 
-        self._win = tk.Toplevel(parent)
-        self._win.attributes("-fullscreen", True)
-        self._win.attributes("-topmost",    True)
-        self._win.attributes("-alpha",      0.35)
-        self._win.configure(bg="black")
-        self._win.overrideredirect(True)
+        self.win = tk.Toplevel(parent_tk)
+        self.win.attributes("-fullscreen", True)
+        self.win.attributes("-alpha", 0.35)
+        self.win.attributes("-topmost", True)
+        self.win.configure(bg="black")
+        self.win.overrideredirect(True)
 
-        self._canvas = tk.Canvas(
-            self._win, cursor="crosshair", bg="black", highlightthickness=0,
-        )
-        self._canvas.pack(fill="both", expand=True)
-        self._canvas.create_text(
-            self._canvas.winfo_screenwidth() // 2, 40,
-            text=(
-                "Drag to mark the ENTIRE merchant grid\n"
-                "(top-left corner --> bottom-right corner)\n"
-                "Release to confirm.  ESC to cancel."
-            ),
-            fill=self.LABEL_COLOR,
-            font=("Segoe UI", 14, "bold"),
-            justify="center",
-        )
-        self._canvas.bind("<ButtonPress-1>",   self._on_press)
-        self._canvas.bind("<B1-Motion>",        self._on_drag)
-        self._canvas.bind("<ButtonRelease-1>", self._on_release)
-        self._win.bind("<Escape>",             self._cancel)
+        self.canvas = tk.Canvas(self.win, cursor="crosshair", bg="black",
+                                highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<ButtonPress-1>",   self._on_press)
+        self.canvas.bind("<B1-Motion>",       self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.win.bind("<Escape>", lambda e: self._cancel())
 
-    def _on_press(self, ev) -> None:
-        self._start_x, self._start_y = ev.x, ev.y
-        for tag in (self._rect_id, self._label_id):
-            if tag:
-                self._canvas.delete(tag)
-        self._rect_id = self._label_id = None
+        self.canvas.create_text(
+            self.canvas.winfo_screenwidth() // 2, 40,
+            text="Drag to select the trade/shop window area.  ESC to cancel.",
+            fill="white", font=("Segoe UI", 18, "bold"))
 
-    def _on_drag(self, ev) -> None:
-        for tag in (self._rect_id, self._label_id):
-            if tag:
-                self._canvas.delete(tag)
-        self._canvas.delete("grid_preview")
-        x0, y0 = min(self._start_x, ev.x), min(self._start_y, ev.y)
-        x1, y1 = max(self._start_x, ev.x), max(self._start_y, ev.y)
-        w, h   = x1 - x0, y1 - y0
-        self._rect_id = self._canvas.create_rectangle(
-            x0, y0, x1, y1,
-            outline=self.BORDER_COLOR, width=self.BORDER_WIDTH,
-            fill=self.FILL_COLOR, stipple="gray25",
-        )
-        cw = max(1, w // self._cols)
-        ch = max(1, h // self._rows)
-        for c in range(1, self._cols):
-            lx = x0 + c * cw
-            self._canvas.create_line(lx, y0, lx, y1, fill="#ffffff", dash=(2,4), tags="grid_preview")
-        for r in range(1, self._rows):
-            ly = y0 + r * ch
-            self._canvas.create_line(x0, ly, x1, ly, fill="#ffffff", dash=(2,4), tags="grid_preview")
-        self._label_id = self._canvas.create_text(
-            x0 + w // 2, y1 + 18,
-            text=f"{w}x{h} px  |  cell {cw}x{ch} px",
-            fill=self.LABEL_COLOR, font=("Courier New", 10),
-        )
+    def _on_press(self, e):
+        self._start = (e.x, e.y)
+        if self._rect: self.canvas.delete(self._rect)
 
-    def _on_release(self, ev) -> None:
-        x0, y0 = min(self._start_x, ev.x), min(self._start_y, ev.y)
-        x1, y1 = max(self._start_x, ev.x), max(self._start_y, ev.y)
-        w, h   = x1 - x0, y1 - y0
-        if w < 10 or h < 10:
-            log.warning("DragSelectOverlay: drag too small -- ignored.")
-            self._cancel(None)
-            return
-        win_x, win_y = self._win.winfo_rootx(), self._win.winfo_rooty()
-        sx, sy = win_x + x0, win_y + y0
-        log.info(f"DragSelectOverlay: screen=({sx},{sy}) size={w}x{h}")
-        self._win.destroy()
-        self._on_done(sx, sy, w, h)
+    def _on_drag(self, e):
+        if not self._start: return
+        if self._rect: self.canvas.delete(self._rect)
+        self._rect = self.canvas.create_rectangle(
+            *self._start, e.x, e.y,
+            outline="#00ff88", width=2, fill="")
 
-    def _cancel(self, _ev) -> None:
-        log.info("DragSelectOverlay: cancelled.")
-        self._win.destroy()
+    def _on_release(self, e):
+        if not self._start: return
+        x1 = min(self._start[0], e.x); y1 = min(self._start[1], e.y)
+        x2 = max(self._start[0], e.x); y2 = max(self._start[1], e.y)
+        self.win.destroy()
+        if x2 - x1 > 20 and y2 - y1 > 20:
+            self._on_done(x1, y1, x2, y2)
+
+    def _cancel(self):
+        self.win.destroy()
+        self._on_done(None, None, None, None)
 
 
 # ---------------------------------------------------------------------------
-#  CALIBRATION WINDOW
+#  Calibration window
 # ---------------------------------------------------------------------------
-
 class CalibrationWindow:
-    def __init__(self, parent: tk.Tk) -> None:
-        self._parent = parent
-        w = tk.Toplevel(parent)
-        self._win = w
-        w.title("Grid Calibration")
-        w.configure(bg="#1a1a2e")
-        w.geometry("520x620")
-        w.attributes("-topmost", True)
+    def __init__(self, parent, cfg, log, on_close):
+        self.cfg = cfg; self.log = log
+        self.win = tk.Toplevel(parent)
+        self.win.title("GoldSense \u2013 Calibrate")
+        self.win.resizable(False, False)
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+        self._on_close = on_close
 
-        fg, muted, gold, bg, green = (
-            "#e0e0e0", "#888888", "#f5a623", "#1a1a2e", "#00c48c"
-        )
+        f = tk.Frame(self.win, padx=10, pady=8)
+        f.pack(fill="both", expand=True)
 
-        tk.Label(w, text="Grid Calibration",
-                 font=("Segoe UI", 13, "bold"), fg=gold, bg=bg).pack(pady=(10,2))
+        tk.Label(f, text="Scan Region  (0 = full screen)",
+                 font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
+        for i, (lbl, attr) in enumerate([
+                ("Left",  "SCAN_LEFT"), ("Top",   "SCAN_TOP"),
+                ("Right", "SCAN_RIGHT"), ("Bot",  "SCAN_BOTTOM")]):
+            tk.Label(f, text=lbl).grid(row=1, column=i*2, sticky="e", padx=(4, 1))
+            var = tk.IntVar(value=getattr(cfg, attr))
+            setattr(self, f"_var_{attr}", var)
+            tk.Spinbox(f, textvariable=var, from_=0, to=9999, width=6).grid(
+                row=1, column=i*2+1, padx=(0, 4))
 
-        instr = (
-            "HOW TO CALIBRATE\n"
-            "1.  Open the merchant's trade window in-game.\n"
-            "2.  Set Columns and Rows below to match the grid.\n"
-            "3.  Click  \"Mark Grid Area\"  -- screen dims.\n"
-            "4.  Drag from TOP-LEFT of grid to BOTTOM-RIGHT.\n"
-            "5.  Release -- cell size is calculated automatically.\n"
-            "6.  Adjust delays and blob settings if needed, then Apply.\n\n"
-            "TOOLTIP ANCHOR  (advanced)\n"
-            "Anchor X/Y = where the cursor sits inside the capture box.\n"
-            "Increase X to shift capture left; increase Y to shift it up.\n"
-            "Default (380, 290) works well for 1920x1080."
-        )
-        tk.Label(w, text=instr, justify="left",
-                 font=("Segoe UI", 9), fg=fg, bg=bg,
-                 wraplength=480).pack(padx=12, pady=4)
+        tk.Button(f, text="\u25a6  Select Region by Drag", command=self._drag_region,
+                  bg="#2a6a3a", fg="white", relief="flat", padx=6).grid(
+            row=2, column=0, columnspan=4, sticky="ew", pady=4)
 
-        tk.Frame(w, bg="#333355", height=1).pack(fill="x", padx=12, pady=6)
+        tk.Label(f, text="Item Blob Detection",
+                 font=("Segoe UI", 9, "bold")).grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        blob_params = [
+            ("Hue Lo",  "BLOB_HUE_LO",  0,  179),
+            ("Hue Hi",  "BLOB_HUE_HI",  0,  179),
+            ("Sat Lo",  "BLOB_SAT_LO",  0,  255),
+            ("Val Lo",  "BLOB_VAL_LO",  0,  255),
+        ]
+        for i, (lbl, attr, lo, hi) in enumerate(blob_params):
+            r, c = divmod(i, 2)
+            tk.Label(f, text=lbl).grid(row=4+r, column=c*2, sticky="e", padx=(4, 1))
+            var = tk.IntVar(value=getattr(cfg, attr))
+            setattr(self, f"_var_{attr}", var)
+            tk.Spinbox(f, textvariable=var, from_=lo, to=hi, width=6).grid(
+                row=4+r, column=c*2+1, padx=(0, 4))
 
-        self._calib_var = tk.StringVar(value=self._calib_str())
-        tk.Label(w, textvariable=self._calib_var,
-                 font=("Courier New", 9), fg=gold, bg=bg,
-                 justify="left").pack(padx=14, anchor="w")
+        tk.Label(f, text="Min Area").grid(row=6, column=0, sticky="e", padx=(4,1))
+        self._var_MIN = tk.IntVar(value=cfg.MIN_BLOB_AREA)
+        tk.Spinbox(f, textvariable=self._var_MIN, from_=50, to=50000, width=7).grid(row=6, column=1)
+        tk.Label(f, text="Max Area").grid(row=6, column=2, sticky="e", padx=(4,1))
+        self._var_MAX = tk.IntVar(value=cfg.MAX_BLOB_AREA)
+        tk.Spinbox(f, textvariable=self._var_MAX, from_=50, to=200000, width=7).grid(row=6, column=3)
 
-        tk.Button(w, text="  Mark Grid Area  ",
-                  command=self._start_drag,
-                  bg=green, fg="white", relief="flat",
-                  font=("Segoe UI", 10, "bold"), pady=5).pack(pady=8)
+        tk.Label(f, text="Timing (ms)",
+                 font=("Segoe UI", 9, "bold")).grid(
+            row=7, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        for i, (lbl, attr) in enumerate([
+                ("Hover", "HOVER_DELAY_MS"), ("Alt",  "ALT_DELAY_MS"),
+                ("Move",  "MOVE_DELAY_MS")]):
+            r, c = divmod(i, 2)
+            tk.Label(f, text=lbl).grid(row=8+r, column=c*2, sticky="e", padx=(4,1))
+            var = tk.IntVar(value=getattr(cfg, attr))
+            setattr(self, f"_var_{attr}", var)
+            tk.Spinbox(f, textvariable=var, from_=50, to=2000, width=6).grid(
+                row=8+r, column=c*2+1, padx=(0,4))
 
-        tk.Frame(w, bg="#333355", height=1).pack(fill="x", padx=12, pady=4)
+        tk.Button(f, text="\u25b6  Test Detection (snapshot)", command=self._test_detect,
+                  bg="#336699", fg="white", relief="flat", padx=6).grid(
+            row=10, column=0, columnspan=4, sticky="ew", pady=4)
+        self._result_lbl = tk.Label(f, text="", fg="#44bb44")
+        self._result_lbl.grid(row=11, column=0, columnspan=4)
 
-        self._spinboxes: dict = {}
-        for attr, lbl_text, from_, to_, step in [
-            ("SHELF_COLS",        "Columns:",               1,  20,    1),
-            ("SHELF_ROWS",        "Rows:",                  1,  30,    1),
-            ("MIN_GOLD_FIND",     "Min Gold Find value:",   1,  9999,  1),
-            ("HOVER_DELAY_MS",    "Hover delay (ms):",     50,  2000, 10),
-            ("ALT_DELAY_MS",      "Compare delay (ms):",   50,  2000, 10),
-            ("TOOLTIP_W",         "Tooltip capture W:",   200,  1200, 10),
-            ("TOOLTIP_H",         "Tooltip capture H:",   100,  1000, 10),
-            ("TOOLTIP_ANCHOR_X",  "Tooltip anchor X:",      0,  1200,  5),
-            ("TOOLTIP_ANCHOR_Y",  "Tooltip anchor Y:",      0,  1000,  5),
-            ("EMPTY_LUMA_THRESH", "Empty luma threshold:",  0,   255,  1),
-            ("BLOB_SAMPLE_RADIUS","Blob sample radius:",    1,    20,  1),
-        ]:
-            fr = tk.Frame(w, bg=bg)
-            fr.pack(fill="x", padx=12, pady=1)
-            tk.Label(fr, text=lbl_text, width=26, anchor="w",
-                     fg=muted, bg=bg,
-                     font=("Segoe UI", 9)).pack(side="left")
-            sp = tk.Spinbox(fr, from_=from_, to=to_, width=6,
-                            increment=step, bg="#0d0d1a", fg=gold,
-                            insertbackground="white",
-                            font=("Courier New", 10))
-            sp.delete(0, "end")
-            sp.insert(0, str(getattr(Config, attr)))
-            sp.pack(side="left", padx=4)
-            self._spinboxes[attr] = sp
+        tk.Button(f, text="Apply & Close", command=self._apply,
+                  bg="#1a6b1a", fg="white", relief="flat", padx=8).grid(
+            row=12, column=0, columnspan=4, sticky="ew", pady=4)
 
-        tk.Button(w, text="Apply & Close",
-                  command=self._apply,
-                  bg=green, fg="white", relief="flat",
-                  font=("Segoe UI", 11, "bold"), pady=6).pack(pady=10)
+    def _drag_region(self):
+        self.win.withdraw()
+        time.sleep(0.3)
+        def on_done(l, t, r, b):
+            self.win.deiconify()
+            if l is None: return
+            self._var_SCAN_LEFT.set(l); self._var_SCAN_TOP.set(t)
+            self._var_SCAN_RIGHT.set(r); self._var_SCAN_BOTTOM.set(b)
+            self._result_lbl.config(text=f"Region: ({l},{t}) \u2013 ({r},{b})")
+        RegionSelectOverlay(self.win, on_done)
 
-    def _start_drag(self) -> None:
-        try:
-            cols = int(self._spinboxes["SHELF_COLS"].get())
-            rows = int(self._spinboxes["SHELF_ROWS"].get())
-        except ValueError:
-            cols, rows = Config.SHELF_COLS, Config.SHELF_ROWS
-        self._win.withdraw()
-        self._parent.after(
-            150,
-            lambda: DragSelectOverlay(self._parent, cols, rows, self._on_drag_done),
-        )
+    def _test_detect(self):
+        self._read_vars()
+        blobs = find_item_blobs(self.cfg, self.log)
+        self._result_lbl.config(
+            text=f"Detected {len(blobs)} item blob(s)."
+                 + (" \u2713" if blobs else "  -- adjust HSV / area params"))
 
-    def _on_drag_done(self, sx: int, sy: int, w: int, h: int) -> None:
-        try:
-            cols = int(self._spinboxes["SHELF_COLS"].get())
-            rows = int(self._spinboxes["SHELF_ROWS"].get())
-        except ValueError:
-            cols, rows = Config.SHELF_COLS, Config.SHELF_ROWS
-        Config.SHELF_ORIGIN_X = sx
-        Config.SHELF_ORIGIN_Y = sy
-        Config.CELL_W         = max(1, w // cols)
-        Config.CELL_H         = max(1, h // rows)
-        log.info(
-            f"Calibration drag: origin=({sx},{sy})"
-            f" area={w}x{h} cell={Config.CELL_W}x{Config.CELL_H}"
-            f" grid={cols}x{rows}"
-        )
-        self._calib_var.set(self._calib_str())
-        self._win.deiconify()
+    def _read_vars(self):
+        for attr in ["SCAN_LEFT","SCAN_TOP","SCAN_RIGHT","SCAN_BOTTOM",
+                     "BLOB_HUE_LO","BLOB_HUE_HI","BLOB_SAT_LO","BLOB_VAL_LO",
+                     "HOVER_DELAY_MS","ALT_DELAY_MS","MOVE_DELAY_MS"]:
+            var = getattr(self, f"_var_{attr}", None)
+            if var is not None: setattr(self.cfg, attr, var.get())
+        self.cfg.MIN_BLOB_AREA = self._var_MIN.get()
+        self.cfg.MAX_BLOB_AREA = self._var_MAX.get()
 
-    def _calib_str(self) -> str:
-        return (
-            f"  Origin  : ({Config.SHELF_ORIGIN_X}, {Config.SHELF_ORIGIN_Y})\n"
-            f"  Cell    : {Config.CELL_W} x {Config.CELL_H} px\n"
-            f"  Grid    : {Config.SHELF_COLS} cols x {Config.SHELF_ROWS} rows\n"
-            f"  Tooltip : {Config.TOOLTIP_W}x{Config.TOOLTIP_H} anchor"
-            f" ({Config.TOOLTIP_ANCHOR_X},{Config.TOOLTIP_ANCHOR_Y})"
-        )
+    def _apply(self):
+        self._read_vars()
+        save_prefs(self.cfg, self.log)
+        self._close()
 
-    def _apply(self) -> None:
-        for attr, sp in self._spinboxes.items():
-            try:
-                setattr(Config, attr, int(sp.get()))
-            except ValueError:
-                pass
-        log.info(
-            f"Calibration applied: origin=({Config.SHELF_ORIGIN_X},{Config.SHELF_ORIGIN_Y})"
-            f" cell=({Config.CELL_W}x{Config.CELL_H})"
-            f" grid={Config.SHELF_COLS}x{Config.SHELF_ROWS}"
-            f" tooltip={Config.TOOLTIP_W}x{Config.TOOLTIP_H}"
-            f" anchor=({Config.TOOLTIP_ANCHOR_X},{Config.TOOLTIP_ANCHOR_Y})"
-            f" luma={Config.EMPTY_LUMA_THRESH}"
-            f" blob_r={Config.BLOB_SAMPLE_RADIUS}"
-        )
-        _save_prefs()
-        self._win.destroy()
+    def _close(self):
+        self.win.destroy()
+        self._on_close()
 
 
 # ---------------------------------------------------------------------------
-#  PASS LIST WINDOW
+#  Pass-list editor
 # ---------------------------------------------------------------------------
-
 class PassListWindow:
-    def __init__(self, parent: tk.Tk) -> None:
-        w = tk.Toplevel(parent)
-        w.title("Pass List")
-        w.configure(bg="#1a1a2e")
-        w.geometry("430x510")
-        w.attributes("-topmost", True)
+    def __init__(self, parent, cfg, log):
+        self.cfg = cfg; self.log = log
+        self.win = tk.Toplevel(parent)
+        self.win.title("GoldSense \u2013 Pass List")
+        self.win.resizable(False, False)
+        tk.Label(self.win,
+                 text="Items on this list are always flagged regardless of stats.",
+                 padx=10, pady=5).pack()
+        self.lb = tk.Listbox(self.win, width=45, height=12)
+        self.lb.pack(padx=10)
+        for item in cfg.PASS_LIST:
+            self.lb.insert(tk.END, item)
+        ef = tk.Frame(self.win)
+        ef.pack(padx=10, pady=4, fill="x")
+        self.entry = tk.Entry(ef)
+        self.entry.pack(side="left", fill="x", expand=True)
+        tk.Button(ef, text="Add",    command=self._add).pack(side="left", padx=2)
+        tk.Button(ef, text="Remove", command=self._remove).pack(side="left")
+        tk.Button(self.win, text="Save & Close", command=self._save,
+                  bg="#1a6b1a", fg="white", relief="flat").pack(pady=4)
 
-        fg, muted, gold, bg = "#e0e0e0", "#888888", "#f5a623", "#1a1a2e"
+    def _add(self):
+        v = self.entry.get().strip()
+        if v: self.lb.insert(tk.END, v); self.entry.delete(0, tk.END)
 
-        tk.Label(w, text="Pass List",
-                 font=("Segoe UI", 13, "bold"), fg=gold, bg=bg).pack(pady=(10,2))
-        tk.Label(w, text=(
-            "Items on this list bypass the worn-item comparison.\n"
-            "Any flat +GF on the shelf will trigger a hit when the slot matches.\n"
-            "Partial name match, case-insensitive.\n"
-            "Example: 'ring of celestial' matches all variants."
-        ), font=("Segoe UI", 9), fg=muted, bg=bg,
-            wraplength=390, justify="left").pack(padx=12, pady=4)
+    def _remove(self):
+        sel = self.lb.curselection()
+        if sel: self.lb.delete(sel[0])
 
-        lf = tk.Frame(w, bg=bg)
-        lf.pack(fill="both", expand=True, padx=12, pady=4)
-        sb = tk.Scrollbar(lf)
-        sb.pack(side="right", fill="y")
-        self._lb = tk.Listbox(lf, yscrollcommand=sb.set, selectmode="single",
-                               bg="#0d0d1a", fg=gold,
-                               font=("Courier New", 10), activestyle="none")
-        self._lb.pack(fill="both", expand=True)
-        sb.config(command=self._lb.yview)
-        for entry in Config.PASS_LIST:
-            self._lb.insert("end", entry)
-
-        ef = tk.Frame(w, bg=bg)
-        ef.pack(fill="x", padx=12, pady=4)
-        self._entry = tk.Entry(ef, bg="#0d0d1a", fg=gold,
-                                insertbackground="white",
-                                font=("Courier New", 10))
-        self._entry.pack(side="left", fill="x", expand=True, padx=(0,4))
-        tk.Button(ef, text="Add", command=self._add,
-                  bg="#0f3460", fg="white", relief="flat",
-                  font=("Segoe UI", 9)).pack(side="left")
-
-        bf = tk.Frame(w, bg=bg)
-        bf.pack(fill="x", padx=12, pady=4)
-        tk.Button(bf, text="Remove Selected", command=self._remove,
-                  bg="#e94560", fg="white", relief="flat",
-                  font=("Segoe UI", 9)).pack(side="left", padx=2)
-        tk.Button(bf, text="Save & Close",
-                  command=lambda: self._save(w),
-                  bg="#00c48c", fg="white", relief="flat",
-                  font=("Segoe UI", 10, "bold")).pack(side="right", padx=2)
-
-    def _add(self) -> None:
-        val = self._entry.get().strip()
-        if val:
-            self._lb.insert("end", val.lower())
-            self._entry.delete(0, "end")
-
-    def _remove(self) -> None:
-        sel = self._lb.curselection()
-        if sel:
-            self._lb.delete(sel[0])
-
-    def _save(self, win: tk.Toplevel) -> None:
-        Config.PASS_LIST = [self._lb.get(i) for i in range(self._lb.size())]
-        log.info(f"Pass list saved: {Config.PASS_LIST}")
-        _save_prefs()
-        win.destroy()
+    def _save(self):
+        self.cfg.PASS_LIST = list(self.lb.get(0, tk.END))
+        save_prefs(self.cfg, self.log)
+        self.win.destroy()
 
 
 # ---------------------------------------------------------------------------
-#  OVERLAY
+#  Main overlay / UI
 # ---------------------------------------------------------------------------
+DARK_BG  = "#1a1a1a"
+MID_BG   = "#242424"
+LIGHT_FG = "#d4d0c8"
+ACC_GRN  = "#22bb55"
+ACC_RED  = "#cc3333"
+ACC_ORG  = "#dd9922"
+BTN_FONT = ("Segoe UI", 9, "bold")
+LBL_FONT = ("Segoe UI", 9)
+LOG_FONT = ("Consolas", 8)
 
-class OverlayWindow:
-    C = {
-        "bg":       "#1a1a2e",
-        "bg_panel": "#16213e",
-        "accent":   "#e94560",
-        "gold":     "#f5a623",
-        "green":    "#00c48c",
-        "text":     "#e0e0e0",
-        "muted":    "#888888",
-        "hit_bg":   "#2d1a00",
-        "dual_bg":  "#3d0a2e",
-        "dual_bdr": "#ff00aa",
-        "btn_bg":   "#0f3460",
-    }
-    FM = ("Courier New", 9)
-    FL = ("Segoe UI", 9)
-    FB = ("Segoe UI", 12, "bold")
-    FT = ("Segoe UI", 8)
 
-    def __init__(self, inspector: InventoryInspector) -> None:
-        self._inspector    = inspector
-        self._q:           queue.Queue    = queue.Queue()
-        self._root:        Optional[tk.Tk] = None
-        self._live         = True
-        self._current_hit: Optional[GoldHit] = None
+class GoldSenseApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("GoldSense v2.0.0")
+        root.configure(bg=DARK_BG)
+        root.resizable(False, False)
+        root.attributes("-topmost", True)
 
-    def run(self) -> None:
-        self._build()
-        self._root.after(100, self._pump)
-        self._root.mainloop()
+        self.cfg  = Config()
+        self.log  = _setup_logging(self.cfg)
+        load_prefs(self.cfg, self.log)
 
-    def _build(self) -> None:
-        r = tk.Tk()
-        self._root = r
-        r.title(f"{Config.APP_NAME} v{Config.APP_VERSION}")
-        r.configure(bg=self.C["bg"])
-        r.attributes("-topmost", True)
-        r.attributes("-alpha", Config.OVERLAY_ALPHA)
-        r.geometry(f"468x860+{Config.OVERLAY_X}+{Config.OVERLAY_Y}")
-        r.resizable(True, True)
-        r.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.ui_q = queue.Queue()
+        self.insp = Inspector(self.cfg, self.log, self.ui_q)
 
-        # Route Tkinter callback errors into our logger instead of silently dying.
-        def _tk_report_callback_exception(exc_type, exc_value, exc_tb):
-            log.error("Tk callback exception", exc_info=(exc_type, exc_value, exc_tb))
-        r.report_callback_exception = _tk_report_callback_exception
+        self._build_ui()
+        self._register_hotkeys()
+        root.after(120, self._poll_queue)
 
-        # Header
-        hdr = tk.Frame(r, bg=self.C["bg_panel"], pady=6)
+    def _build_ui(self):
+        root = self.root
+        hdr = tk.Frame(root, bg="#111", pady=4)
         hdr.pack(fill="x")
-        tk.Label(hdr, text=f"{Config.APP_NAME}  v{Config.APP_VERSION}",
-                 font=self.FB, fg=self.C["gold"],
-                 bg=self.C["bg_panel"]).pack()
-        self._status_lbl = tk.Label(hdr, text="Idle",
-                                     font=self.FL, fg=self.C["muted"],
-                                     bg=self.C["bg_panel"])
-        self._status_lbl.pack()
+        tk.Label(hdr, text="GoldSense  v2.0.0", bg="#111", fg="#e8c84a",
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10)
+        self._state_lbl = tk.Label(hdr, text="Halted", bg="#111", fg=ACC_RED,
+                                   font=("Segoe UI", 9, "bold"))
+        self._state_lbl.pack(side="right", padx=10)
 
-        # Stats row
-        sf = tk.Frame(r, bg=self.C["bg"], pady=4)
-        sf.pack(fill="x", padx=6)
-        self._sv: dict = {}
-        for key, lbl in [
-            ("lap",     "Lap #"),
-            ("blobs",   "Blobs"),
-            ("items",   "Visited"),
-            ("hits",    "Hits"),
-            ("dual",    "Dual GF"),
-            ("best_f",  "Best +Flat"),
-            ("elapsed", "Time"),
-        ]:
-            cf = tk.Frame(sf, bg=self.C["bg_panel"], padx=4, pady=3)
-            cf.pack(side="left", expand=True, fill="x", padx=1)
-            tk.Label(cf, text=lbl, font=self.FT,
-                     fg=self.C["muted"], bg=self.C["bg_panel"]).pack()
+        sf = tk.Frame(root, bg=MID_BG, pady=3)
+        sf.pack(fill="x", padx=2, pady=(2, 0))
+        self._stat_vars = {}
+        for lbl, key, w in [
+                ("Lap",      "lap",     4),
+                ("Blobs",    "blobs",   5),
+                ("Visited",  "visited", 6),
+                ("Hits",     "hits",    4),
+                ("Best +Flat","best",   8)]:
+            tk.Label(sf, text=lbl, bg=MID_BG, fg="#888",
+                     font=("Segoe UI", 7)).pack(side="left", padx=(6,1))
             v = tk.StringVar(value="0")
-            self._sv[key] = v
-            tk.Label(cf, textvariable=v,
-                     font=("Segoe UI", 10, "bold"),
-                     fg=self.C["gold"], bg=self.C["bg_panel"]).pack()
+            self._stat_vars[key] = v
+            tk.Label(sf, textvariable=v, bg=MID_BG, fg=LIGHT_FG,
+                     font=("Segoe UI", 8, "bold"), width=w).pack(side="left")
 
-        # Current blob
-        tf = tk.Frame(r, bg=self.C["bg"])
-        tf.pack(fill="x", padx=6, pady=1)
-        tk.Label(tf, text="Item:", font=self.FT,
-                 fg=self.C["muted"], bg=self.C["bg"]).pack(side="left")
-        self._cell_var = tk.StringVar(value="--")
-        tk.Label(tf, textvariable=self._cell_var,
-                 font=self.FM, fg=self.C["text"],
-                 bg=self.C["bg"]).pack(side="left", padx=4)
+        self._item_lbl = tk.Label(root, text="Item: \u2013", bg=DARK_BG,
+                                  fg="#aaaaaa", font=LBL_FONT, anchor="w")
+        self._item_lbl.pack(fill="x", padx=8, pady=(4, 0))
 
-        # Hit panel
-        self._hit_frame = tk.Frame(r, bg=self.C["hit_bg"], relief="groove", bd=2)
-        self._hit_frame.pack(fill="x", padx=6, pady=4)
-        self._hit_lbl = tk.Label(
-            self._hit_frame, text="No hits yet.",
-            font=("Segoe UI", 10, "bold"),
-            fg=self.C["gold"], bg=self.C["hit_bg"],
-            wraplength=430, justify="left", pady=6, padx=6,
-        )
-        self._hit_lbl.pack(fill="x")
-        self._cmp_lbl = tk.Label(
-            self._hit_frame, text="",
-            font=self.FM, fg=self.C["text"], bg=self.C["hit_bg"],
-            wraplength=430, justify="left", padx=6,
-        )
-        self._cmp_lbl.pack(fill="x")
+        self._hit_banner = tk.Label(root, text="No hits yet.", bg="#1f3020",
+                                    fg="#88ff99", font=("Segoe UI", 9, "bold"),
+                                    pady=5, relief="groove")
+        self._hit_banner.pack(fill="x", padx=4, pady=3)
 
-        # Dual GF banner
-        self._dual_frame = tk.Frame(r, bg=self.C["dual_bg"], relief="groove", bd=3)
-        self._dual_lbl   = tk.Label(
-            self._dual_frame, text="",
-            font=("Segoe UI", 11, "bold"),
-            fg=self.C["dual_bdr"], bg=self.C["dual_bg"],
-            wraplength=430, justify="center", pady=8, padx=6,
-        )
-        self._dual_lbl.pack(fill="x")
+        bf = tk.Frame(root, bg=DARK_BG)
+        bf.pack(fill="x", padx=4, pady=2)
+        self._btn_begin = self._btn(bf, "BEGIN  (F6)", self._on_begin,
+                                    ACC_GRN, "white", width=14)
+        self._btn_begin.pack(side="left", padx=2, expand=True, fill="x")
+        self._btn_next  = self._btn(bf, "NEXT  (F7)", self._on_next,
+                                    "#2255aa", "white", width=10)
+        self._btn_next.pack(side="left", padx=2, expand=True, fill="x")
 
-        # Primary buttons
-        bs = dict(font=("Segoe UI", 10, "bold"), relief="flat",
-                  padx=8, pady=4, cursor="hand2")
-        bf1 = tk.Frame(r, bg=self.C["bg"], pady=4)
-        bf1.pack(fill="x", padx=6)
-        self._btn_begin = tk.Button(
-            bf1, text="  BEGIN  (F6)",
-            bg=self.C["green"], fg="white",
-            command=self._toggle_begin, **bs)
-        self._btn_begin.pack(side="left", expand=True, fill="x", padx=2)
-        self._btn_next = tk.Button(
-            bf1, text="  NEXT  (F7)",
-            bg=self.C["btn_bg"], fg=self.C["muted"],
-            state="disabled", command=self._next, **bs)
-        self._btn_next.pack(side="left", expand=True, fill="x", padx=2)
+        bf2 = tk.Frame(root, bg=DARK_BG)
+        bf2.pack(fill="x", padx=4, pady=(0, 2))
+        self._btn_hold = self._btn(bf2, "HOLD  (F8)", self._on_hold, "#555", LIGHT_FG, width=10)
+        self._btn_hold.pack(side="left", padx=2, expand=True, fill="x")
+        self._btn(bf2, "Calibrate", self._open_calib, "#336699", "white", width=10).pack(
+            side="left", padx=2, expand=True, fill="x")
+        self._btn(bf2, "Pass List", self._open_pass,  "#555566", LIGHT_FG, width=10).pack(
+            side="left", padx=2, expand=True, fill="x")
+        self._btn(bf2, "Open Log",  self._open_log,   "#333",    LIGHT_FG, width=10).pack(
+            side="left", padx=2, expand=True, fill="x")
 
-        # Secondary buttons
-        bf2 = tk.Frame(r, bg=self.C["bg"])
-        bf2.pack(fill="x", padx=6, pady=2)
-        for txt, cmd in [
-            ("HOLD (F8)",  self._hold),
-            ("Calibrate",  self._open_calibrate),
-            ("Pass List",  self._open_passlist),
-            ("Open Log",   self._open_log),
-        ]:
-            tk.Button(bf2, text=txt, bg=self.C["btn_bg"],
-                      fg=self.C["text"], command=cmd, **bs
-                      ).pack(side="left", expand=True, fill="x", padx=2)
+        tk.Label(root, text="F6=Begin/Halt  F7=Next  F8=Hold  ESC=Halt",
+                 bg=DARK_BG, fg="#555", font=("Segoe UI", 7)).pack(pady=(0, 2))
 
-        # Hotkey hint
-        hk = tk.Frame(r, bg=self.C["bg_panel"], pady=2)
-        hk.pack(fill="x", padx=6, pady=2)
-        tk.Label(hk, text="F6=Begin/Halt   F7=Next   F8=Hold   ESC=Halt",
-                 font=self.FT, fg=self.C["muted"],
-                 bg=self.C["bg_panel"]).pack()
-
-        # Live log
-        tk.Label(r, text="Activity Log", font=self.FT,
-                 fg=self.C["muted"], bg=self.C["bg"]).pack(anchor="w", padx=8)
+        lf = tk.LabelFrame(root, text=" Activity Log ", bg=DARK_BG, fg="#666",
+                            font=("Segoe UI", 8))
+        lf.pack(fill="both", expand=True, padx=4, pady=(0, 4))
         self._log_box = scrolledtext.ScrolledText(
-            r, height=10, font=self.FM,
-            bg="#0d0d1a", fg=self.C["text"],
-            state="disabled", relief="flat")
-        self._log_box.pack(fill="both", expand=True, padx=6, pady=(0,4))
+            lf, bg="#0d0d0d", fg="#888877", font=LOG_FONT,
+            height=8, state="disabled", wrap="word")
+        self._log_box.pack(fill="both", expand=True)
 
-        # Hit history
-        tk.Label(r, text="Hit History", font=self.FT,
-                 fg=self.C["muted"], bg=self.C["bg"]).pack(anchor="w", padx=8)
-        self._hist_box = scrolledtext.ScrolledText(
-            r, height=6, font=self.FM,
-            bg="#0d0d1a", fg=self.C["gold"],
-            state="disabled", relief="flat")
-        self._hist_box.pack(fill="both", expand=False, padx=6, pady=(0,6))
+        hf = tk.LabelFrame(root, text=" Hit History ", bg=DARK_BG, fg="#666",
+                            font=("Segoe UI", 8))
+        hf.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._hit_box = scrolledtext.ScrolledText(
+            hf, bg="#0d0d0d", fg="#88ff99", font=LOG_FONT,
+            height=5, state="disabled", wrap="word")
+        self._hit_box.pack(fill="both", expand=True)
 
-        # Wire inspector callbacks
-        self._inspector.on_hit     = lambda h:       self._q.put(("hit",     h))
-        self._inspector.on_blob    = lambda b, t:    self._q.put(("blob",    (b, t)))
-        self._inspector.on_restock = lambda n:       self._q.put(("restock", n))
-        self._inspector.on_status  = lambda s:       self._q.put(("status",  s))
-        self._inspector.on_halted  = lambda:         self._q.put(("halted",))
+    @staticmethod
+    def _btn(parent, text, cmd, bg, fg, width=8):
+        return tk.Button(parent, text=text, command=cmd,
+                         bg=bg, fg=fg, relief="flat",
+                         font=BTN_FONT, width=width,
+                         activebackground=bg, activeforeground=fg,
+                         bd=0, padx=4, pady=4)
 
-        self._reg_hotkeys()
-        self._root.after(500, self._tick_stats)
+    def _on_begin(self):
+        s = self.insp._get()
+        if s == "halted":  self.insp.begin()
+        else:              self.insp.halt()
 
-    def _reg_hotkeys(self) -> None:
-        for key, fn in [
-            (Config.HOTKEY_BEGIN_HALT, self._toggle_begin),
-            (Config.HOTKEY_NEXT,       self._next),
-            (Config.HOTKEY_HOLD,       self._hold),
-            (Config.HOTKEY_HALT,       self._emergency),
-        ]:
-            try:
-                keyboard.add_hotkey(key, fn, suppress=False)
-            except Exception as exc:
-                log.warning(f"Hotkey {key} failed: {exc}")
+    def _on_next(self):  self.insp.next_item()
+    def _on_hold(self):  self.insp.hold()
 
-    def _pump(self) -> None:
+    def _open_calib(self):
+        if not getattr(self, "_calib_open", False):
+            self._calib_open = True
+            CalibrationWindow(self.root, self.cfg, self.log,
+                              on_close=lambda: setattr(self, "_calib_open", False))
+
+    def _open_pass(self):  PassListWindow(self.root, self.cfg, self.log)
+
+    def _open_log(self):
+        log_dir = Path(self.cfg.LOG_DIR)
+        if sys.platform == "win32":  os.startfile(str(log_dir))
+        else:
+            import subprocess; subprocess.Popen(["xdg-open", str(log_dir)])
+
+    def _register_hotkeys(self):
+        try:
+            keyboard.add_hotkey("f6",  self._on_begin,  suppress=False)
+            keyboard.add_hotkey("f7",  self._on_next,   suppress=False)
+            keyboard.add_hotkey("f8",  self._on_hold,   suppress=False)
+            keyboard.add_hotkey("esc", self.insp.halt,  suppress=False)
+        except Exception as exc:
+            self.log.warning("Hotkey registration failed: %s", exc)
+
+    def _poll_queue(self):
         try:
             while True:
-                msg  = self._q.get_nowait()
-                kind = msg[0]
-                if kind == "hit":
-                    self._on_hit(msg[1])
-                elif kind == "blob":
-                    blob, _ = msg[1]
-                    self._cell_var.set(blob.label())
-                elif kind == "restock":
-                    self._log(f"=== Shelf restocked (lap #{msg[1]}) ===", "gold")
-                elif kind == "status":
-                    self._set_status(msg[1])
-                elif kind == "halted":
-                    self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
-                    self._btn_next.config(state="disabled",
-                                          bg=self.C["btn_bg"],
-                                          fg=self.C["muted"])
-                    self._set_status("Halted")
-                    self._hide_dual_banner()
+                msg = self.ui_q.get_nowait()
+                kind, payload = msg["kind"], msg["payload"]
+                if kind == "state":
+                    lbl_map = {
+                        "halted":     ("Halted",    ACC_RED),
+                        "running":    ("Running",   ACC_GRN),
+                        "holding":    ("Holding",   ACC_ORG),
+                        "paused_hit": ("HIT FOUND", "#ff88ff"),
+                    }
+                    txt, col = lbl_map.get(payload, ("?", LIGHT_FG))
+                    self._state_lbl.config(text=txt, fg=col)
+                    if payload == "halted":
+                        self._btn_begin.config(text="BEGIN  (F6)", bg=ACC_GRN)
+                    elif payload == "running":
+                        self._btn_begin.config(text="HALT  (F6)", bg=ACC_RED)
+                elif kind == "lap":         self._stat_vars["lap"].set(str(payload))
+                elif kind == "blobs":       self._stat_vars["blobs"].set(str(payload))
+                elif kind == "visited":     self._stat_vars["visited"].set(str(payload))
+                elif kind == "hits_count":  self._stat_vars["hits"].set(str(payload))
+                elif kind == "item_pos":    self._item_lbl.config(text=f"Item: {payload}")
+                elif kind == "hit":
+                    hr = payload
+                    best = max(int(self._stat_vars["best"].get().lstrip("+") or 0), hr.shelf_gf)
+                    self._stat_vars["best"].set(f"+{best}")
+                    banner = (
+                        f"HIT: {hr.item_name}\n"
+                        f"Shelf GF: +{hr.shelf_gf}   Equipped: "
+                        + (f"+{hr.equipped_gf}" if hr.equipped_gf else "none")
+                    )
+                    self._hit_banner.config(text=banner, bg="#2a1a3a", fg="#ff88ff")
+                    self._append_hit_box(
+                        f"[{hr.timestamp}] Lap {hr.lap} Item {hr.blob_idx+1}: "
+                        f"{hr.item_name}  shelf={hr.shelf_gf} worn={hr.equipped_gf}\n")
+                elif kind == "hit_resolved":
+                    self._hit_banner.config(
+                        text="Passed \u2013 resuming scan.", bg="#1f2a1f", fg="#88ff99")
+                elif kind == "log":   self._append_log(str(payload))
+                elif kind == "crash":
+                    self._append_log("CRASH -- see log file for details.")
+                    messagebox.showerror("GoldSense Crash", str(payload)[:600])
         except queue.Empty:
             pass
-        if self._live:
-            self._root.after(50, self._pump)
+        self.root.after(120, self._poll_queue)
 
-    def _on_hit(self, h: GoldHit) -> None:
-        self._current_hit = h
-        si, wi = h.shelf_item, h.worn_item
-        if h.is_dual_gf:
-            header = f"DUAL GF!  +{si.flat_gf} flat & +{si.pct_gf}%  -- confirm before passing"
-            self._hit_frame.config(bg=self.C["dual_bg"])
-            self._hit_lbl.config(bg=self.C["dual_bg"], fg=self.C["dual_bdr"], text=header)
-            self._show_dual_banner(si)
-        else:
-            header = f"+{si.flat_gf} Gold Find  --  '{si.name}'"
-            self._hit_frame.config(bg="#4a2a00")
-            self._hit_lbl.config(bg="#4a2a00", fg=self.C["gold"], text=header)
-            self._hide_dual_banner()
-
-        lines = [f"  Shelf: +{si.flat_gf} flat  +{si.pct_gf}%  [{si.name[:40]}]"]
-        if wi:
-            tag = " (PASSED)" if is_passed(wi) else ""
-            lines.append(f"  Worn:  +{wi.flat_gf} flat  +{wi.pct_gf}%  [{wi.name[:40]}]{tag}")
-        lines.append(f"  Item:  {h.blob.label()}  cells={h.blob.cells}")
-        self._cmp_lbl.config(text="\n".join(lines), bg=self._hit_frame["bg"])
-
-        next_txt = "  PASS  (F7)" if h.is_dual_gf else "  NEXT  (F7)"
-        self._btn_next.config(
-            state="normal",
-            bg=self.C["dual_bdr"] if h.is_dual_gf else self.C["accent"],
-            fg="white", text=next_txt,
-        )
-
-        kind_tag = "DUAL" if h.is_dual_gf else "HIT"
-        hist = (
-            f"{h.timestamp[11:19]}  [{kind_tag}]  "
-            f"+{si.flat_gf}flat  +{si.pct_gf}%  "
-            f"{h.blob.label()}  {si.name[:30]}\n"
-        )
-        self._append_hist(hist)
-        self._log(header, "accent" if h.is_dual_gf else "gold")
-        self._set_status(
-            "WAITING -- DUAL GF -- confirm before passing"
-            if h.is_dual_gf else
-            "WAITING -- press F7 to pass"
-        )
-
-    def _show_dual_banner(self, si: ParsedItem) -> None:
-        self._dual_lbl.config(text=(
-            f"DUAL GOLD-FIND ITEM\n"
-            f"+{si.flat_gf} flat  AND  +{si.pct_gf}% percent\n"
-            f"This is RARE -- confirm before passing!\n"
-            f"Buy with Shift+Click, or press F7 to pass."
-        ))
-        self._dual_frame.pack(fill="x", padx=6, pady=2)
-
-    def _hide_dual_banner(self) -> None:
-        try:
-            self._dual_frame.pack_forget()
-        except Exception:
-            pass
-
-    def _toggle_begin(self) -> None:
-        if self._inspector._active:
-            self._inspector.halt()
-            self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
-        else:
-            self._inspector.begin()
-            self._btn_begin.config(text="  HALT  (F6)", bg=self.C["accent"])
-            self._log("Scan started.", "green")
-            self._hide_dual_banner()
-
-    def _next(self) -> None:
-        h = self._current_hit
-        if h and h.is_dual_gf:
-            if not messagebox.askyesno(
-                "Pass on DUAL GF item?",
-                (
-                    f"Are you sure you want to PASS on this dual Gold-Find item?\n"
-                    f"+{h.shelf_item.flat_gf} flat AND +{h.shelf_item.pct_gf}%\n\n"
-                    f"Press NO to go back and buy it."
-                ),
-                default="no",
-            ):
-                return
-        self._inspector.user_next()
-        self._btn_next.config(state="disabled", text="  NEXT  (F7)",
-                               bg=self.C["btn_bg"], fg=self.C["muted"])
-        self._hide_dual_banner()
-        self._hit_frame.config(bg=self.C["hit_bg"])
-        self._hit_lbl.config(bg=self.C["hit_bg"])
-        self._cmp_lbl.config(bg=self.C["hit_bg"], text="")
-        self._log("Passed.", "muted")
-
-    def _hold(self) -> None:
-        self._inspector.hold_toggle()
-
-    def _emergency(self) -> None:
-        log.warning("HALT!")
-        self._inspector.halt()
-        self._btn_begin.config(text="  BEGIN  (F6)", bg=self.C["green"])
-        self._hide_dual_banner()
-        self._set_status("HALTED")
-
-    def _open_calibrate(self) -> None:
-        CalibrationWindow(self._root)
-
-    def _open_passlist(self) -> None:
-        PassListWindow(self._root)
-
-    def _open_log(self) -> None:
-        try:
-            os.startfile(str(_log_file))
-        except Exception:
-            messagebox.showinfo("Session log", str(_log_file))
-
-    def _set_status(self, msg: str) -> None:
-        self._status_lbl.config(text=msg)
-
-    def _log(self, msg: str, color: str = "text") -> None:
-        ts   = datetime.datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}\n"
-        c    = self.C.get(color, self.C["text"])
+    def _append_log(self, text):
         self._log_box.config(state="normal")
-        self._log_box.insert("end", line)
-        tag = f"clr_{color}"
-        self._log_box.tag_config(tag, foreground=c)
-        self._log_box.tag_add(tag, f"end - {len(line) + 1}c", "end - 1c")
-        self._log_box.see("end")
+        self._log_box.insert(tk.END, text + "\n")
+        self._log_box.see(tk.END)
         self._log_box.config(state="disabled")
 
-    def _append_hist(self, line: str) -> None:
-        self._hist_box.config(state="normal")
-        self._hist_box.insert("end", line)
-        self._hist_box.see("end")
-        self._hist_box.config(state="disabled")
-
-    def _tick_stats(self) -> None:
-        s = self._inspector.stats
-        self._sv["lap"].set(str(s.lap_number))
-        self._sv["blobs"].set(str(s.blobs_found))
-        self._sv["items"].set(str(s.items_visited))
-        self._sv["hits"].set(str(s.hits))
-        self._sv["dual"].set(str(s.dual_hits))
-        self._sv["best_f"].set(f"+{s.best_flat}")
-        self._sv["elapsed"].set(s.elapsed_str())
-        if self._live:
-            self._root.after(500, self._tick_stats)
-
-    def _on_close(self) -> None:
-        self._live = False
-        self._inspector.halt()
-        keyboard.unhook_all()
-        _save_prefs()
-        log.info("Overlay closed.")
-        self._root.destroy()
+    def _append_hit_box(self, text):
+        self._hit_box.config(state="normal")
+        self._hit_box.insert(tk.END, text)
+        self._hit_box.see(tk.END)
+        self._hit_box.config(state="disabled")
 
 
 # ---------------------------------------------------------------------------
-#  MAIN
+#  Entry point
 # ---------------------------------------------------------------------------
-
-def main() -> None:
-    log.info("=" * 60)
-    log.info(f"  {Config.APP_NAME}  v{Config.APP_VERSION}")
-    log.info(f"  Session log: {_log_file}")
-    log.info(f"  Pass list: {Config.PASS_LIST}")
-    log.info("=" * 60)
-
-    reader    = ScrollReader()
-    capture   = ScreenCapture()
-    detector  = GridBlobDetector()
-    inspector = InventoryInspector(reader, capture, detector)
-    overlay   = OverlayWindow(inspector)
-    overlay.run()
-    log.info("Goodbye.")
+def main():
+    root = tk.Tk()
+    app  = GoldSenseApp(root)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        app.insp.halt()
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        log.critical("Fatal error in main(): %s", exc, exc_info=True)
+        logging.getLogger("GoldSense").critical("Fatal: %s", exc, exc_info=True)
         raise
