@@ -13,25 +13,12 @@ rem  GoldSense v2.0.0  --  Merchant Inventory Inspector
 rem  Vision-AI Edition.  Unzip anywhere, run INSTALL.bat, done.
 rem ================================================================
 
-rem  %~s0 gives the 8.3 short path of this .bat file -- no spaces,
-rem  no parentheses, safe for all cmd.exe block operations.
-for %%I in ("%~s0") do set "SRC_DIR=%%~dpI"
+set "SRC_DIR=%~dp0"
 if "%SRC_DIR:~-1%"=="\" set "SRC_DIR=%SRC_DIR:~0,-1%"
 
-rem  Install target: fixed clean path so we never run from a temp
-rem  extract folder with spaces or brackets in its name.
-rem  Override by setting GS_INSTALL_DIR before running, or pass as arg 1.
-if defined GS_INSTALL_DIR (
-    set "INSTALL_DIR=%GS_INSTALL_DIR%"
-) else if not "%~1"=="" (
-    set "INSTALL_DIR=%~1"
-) else (
-    set "INSTALL_DIR=C:\GoldSense"
-)
-
-set "CONDA_DIR=%INSTALL_DIR%\_conda"
-set "ENV_DIR=%INSTALL_DIR%\env"
-set "TOOLS_DIR=%INSTALL_DIR%\_tools"
+set "CONDA_DIR=%SRC_DIR%\_conda"
+set "ENV_DIR=%SRC_DIR%\env"
+set "TOOLS_DIR=%SRC_DIR%\_tools"
 set "BACKUPS_DIR=%TOOLS_DIR%\backups"
 set "LOG=%TOOLS_DIR%\last_run.log"
 set "PINFILE=%TOOLS_DIR%\pinned.txt"
@@ -42,14 +29,12 @@ set "ENV_PYTHON=%ENV_DIR%\python.exe"
 set "APP_VERSION=2.0.0"
 set "PYTHON_VER=3.11"
 
-if not exist "%INSTALL_DIR%"  mkdir "%INSTALL_DIR%"
 if not exist "%TOOLS_DIR%"    mkdir "%TOOLS_DIR%"
 if not exist "%BACKUPS_DIR%"  mkdir "%BACKUPS_DIR%"
 
 call :timestamp TS_START
 echo [%TS_START%] GoldSense setup v%APP_VERSION% > "%LOG%"
-echo Repo:    %SRC_DIR%    >> "%LOG%"
-echo Install: %INSTALL_DIR% >> "%LOG%"
+echo Dir: %SRC_DIR% >> "%LOG%"
 
 rem ================================================================
 rem  MAIN MENU
@@ -73,8 +58,7 @@ if exist "%ENV_PYTHON%" (
 ) else (
     echo  Status: [NOT SET UP]  -- run option 1 first
 )
-echo  Source:  %SRC_DIR%
-echo  Install: %INSTALL_DIR%
+echo  Dir: %SRC_DIR%
 echo  +--------------------------------------------------------------+
 echo.
 
@@ -94,9 +78,6 @@ goto :MENU
 
 :DO_INSTALL
 echo  --- SETUP ---
-echo.
-echo  Source (scripts): %SRC_DIR%
-echo  Install (env):    %INSTALL_DIR%
 echo.
 if exist "%ENV_PYTHON%" (
     set "REINSTALL=N"
@@ -141,7 +122,7 @@ if not exist "%ENV_PYTHON%" (
     goto :MENU
 )
 if not exist "%SRC_DIR%\src\main.py" (
-    echo  [ERROR] src\main.py not found in: %SRC_DIR%\src\
+    echo  [ERROR] src\main.py not found.
     call :pause_return
     goto :MENU
 )
