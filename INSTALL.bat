@@ -277,6 +277,7 @@ exit /b 0
     echo torch^>=2.2.0
     echo huggingface-hub^>=0.22.0
     echo accelerate^>=0.29.0
+    echo einops^>=0.7.0
     echo rapidocr-onnxruntime^>=1.3.22
     echo onnxruntime^>=1.19.2
 ) > "%PINFILE%"
